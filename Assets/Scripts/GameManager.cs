@@ -45,21 +45,7 @@ public class GameManager : MonoBehaviour
     public GameObject bloodSplatPrefab;
     public GameObject deathPlaceholderPrefab;
     public GameObject artifactDeathPrefab;
-    public GameObject playerLifeContainer;
-    public GameObject enemyLifeContainer;
-    public GameObject floatingDamagePrefab;
-    public GameObject favouritePopupPrefab;
     public GameObject triggerVFXPrefab;
-
-    // Tracks cumulative life changes during a combat step
-    private TMP_Text playerLifeDeltaText;
-    private TMP_Text enemyLifeDeltaText;
-    private int playerLifeDelta = 0;
-    private int enemyLifeDelta = 0;
-    private Coroutine playerDeltaRoutine;
-    private Coroutine enemyDeltaRoutine;
-    // When true, life delta text will not automatically fade out.
-    private bool lifeDeltaFadeDeferred = false;
 
     public ArtifactCard targetingArtifact;
     public EquipmentCard targetingEquipment;
@@ -283,337 +269,337 @@ public class GameManager : MonoBehaviour
     }
 
     public void PlayCard(Player player, CardVisual visual)
+    {
+        if (IsStackActive())
         {
-            if (IsStackActive())
+            Debug.Log("A spell is already on the stack. Please wait.");
+            return;
+        }
+
+        Card card = visual.linkedCard;
+
+        if (IsOnlyCastCreatureSpellsActive() && !(card is CreatureCard) && !(card is LandCard))
+        {
+            Debug.Log("Anti-Magic Grid prevents casting non-creature spells.");
+            return;
+        }
+
+        if (card is LandCard)
+        {
+            if (player.hasPlayedLandThisTurn)
             {
-                Debug.Log("A spell is already on the stack. Please wait.");
+                Debug.Log("You already played a land this turn!");
                 return;
             }
 
-            Card card = visual.linkedCard;
+            player.Battlefield.Add(card);
+            player.Hand.Remove(card);
+            player.hasPlayedLandThisTurn = true;
 
-            if (IsOnlyCastCreatureSpellsActive() && !(card is CreatureCard) && !(card is LandCard))
+            if (card.entersTapped || GameManager.Instance.IsAllPermanentsEnterTappedActive())
             {
-                Debug.Log("Anti-Magic Grid prevents casting non-creature spells.");
-                return;
+                card.isTapped = true;
+                Debug.Log($"{card.cardName} enters tapped (static effect or base).");
             }
 
-            if (card is LandCard)
+            card.OnEnterPlay(player);
+            NotifyLandEntered(card, player);
+
+            visual.transform.SetParent(player == humanPlayer ? playerLandArea : aiLandArea, false);
+            visual.isInBattlefield = true;
+            visual.UpdateVisual();
+            SoundManager.Instance.PlaySound(SoundManager.Instance.cardPlay);
+
+            AwardFavouriteCardCoins(card, player);
+
+        }
+
+        else if (card is CreatureCard creature)
+        {
+            var cost = GetManaCostBreakdown(card.manaCost, card.color);
+            int tax = GetOpponentSpellTax(player);
+            if (tax > 0)
             {
-                if (player.hasPlayedLandThisTurn)
+                if (!cost.ContainsKey("Colorless"))
+                    cost["Colorless"] = 0;
+                cost["Colorless"] += tax;
+            }
+            int reduction = GetCreatureCostReduction(player);
+            CardData data = CardDatabase.GetCardData(card.cardName);
+            if (data != null && data.subtypes.Contains("Beast"))
+                reduction += GetBeastCreatureCostReduction(player);
+            if (reduction > 0 && cost.ContainsKey("Colorless"))
+                cost["Colorless"] = Mathf.Max(0, cost["Colorless"] - reduction);
+            if (player.ColoredMana.CanPay(cost))
+            {
+                isStackBusy = true; // block other actions while creature is on stack
+                player.ColoredMana.Pay(cost);
+                if (card.hasXCost)
                 {
-                    Debug.Log("You already played a land this turn!");
-                    return;
+                    card.xValue = player.ColoredMana.Total();
+                    if (card.xValue > 0)
+                        player.ColoredMana.SpendGeneric(card.xValue);
                 }
-
-                player.Battlefield.Add(card);
+                card.owner = player;
+                if (player == humanPlayer) UpdateUI();
                 player.Hand.Remove(card);
-                player.hasPlayedLandThisTurn = true;
 
-                if (card.entersTapped || GameManager.Instance.IsAllPermanentsEnterTappedActive())
-                {
-                    card.isTapped = true;
-                    Debug.Log($"{card.cardName} enters tapped (static effect or base).");
-                }
-
-                card.OnEnterPlay(player);
-                NotifyLandEntered(card, player);
-
-                visual.transform.SetParent(player == humanPlayer ? playerLandArea : aiLandArea, false);
-                visual.isInBattlefield = true;
-                visual.UpdateVisual();
+                // Move visual to the stack zone
+                visual.transform.SetParent(stackZone, false);
+                visual.isInStack = true;
+                visual.transform.localPosition = Vector3.zero;
+                visual.transform.localRotation = Quaternion.identity;
+                visual.transform.localScale = Vector3.one;
                 SoundManager.Instance.PlaySound(SoundManager.Instance.cardPlay);
 
-                AwardFavouriteCardCoins(card, player);
-
-            }
-
-            else if (card is CreatureCard creature)
-            {
-                var cost = GetManaCostBreakdown(card.manaCost, card.color);
-                int tax = GetOpponentSpellTax(player);
-                if (tax > 0)
-                {
-                    if (!cost.ContainsKey("Colorless"))
-                        cost["Colorless"] = 0;
-                    cost["Colorless"] += tax;
-                }
-                int reduction = GetCreatureCostReduction(player);
-                CardData data = CardDatabase.GetCardData(card.cardName);
-                if (data != null && data.subtypes.Contains("Beast"))
-                    reduction += GetBeastCreatureCostReduction(player);
-                if (reduction > 0 && cost.ContainsKey("Colorless"))
-                    cost["Colorless"] = Mathf.Max(0, cost["Colorless"] - reduction);
-                if (player.ColoredMana.CanPay(cost))
-                {
-                    isStackBusy = true; // block other actions while creature is on stack
-                    player.ColoredMana.Pay(cost);
-                    if (card.hasXCost)
-                    {
-                        card.xValue = player.ColoredMana.Total();
-                        if (card.xValue > 0)
-                            player.ColoredMana.SpendGeneric(card.xValue);
-                    }
-                    card.owner = player;
-                    if (player == humanPlayer) UpdateUI();
-                    player.Hand.Remove(card);
-
-                    // Move visual to the stack zone
-                    visual.transform.SetParent(stackZone, false);
-                    visual.isInStack = true;
-                    visual.transform.localPosition = Vector3.zero;
-                    visual.transform.localRotation = Quaternion.identity;
-                    visual.transform.localScale = Vector3.one;
-                    SoundManager.Instance.PlaySound(SoundManager.Instance.cardPlay);
-
-                    StartCoroutine(ResolveCreatureAfterDelay(creature, visual, player));
-                }
-                else
-                {
-                    Debug.Log("Not enough colored mana to cast this creature.");
-                }
-            }
-
-            else if (card is SorceryCard sorcery)
-            {
-                if (sorcery.requiresTarget)
-                {
-                    Debug.Log("This sorcery requires a target — entering targeting mode.");
-                    BeginTargetSelection(sorcery, player, visual);
-                    return;
-                }
-
-                var cost = GetManaCostBreakdown(sorcery.manaCost, sorcery.color);
-                int tax = GetOpponentSpellTax(player);
-                if (tax > 0)
-                {
-                    if (!cost.ContainsKey("Colorless"))
-                        cost["Colorless"] = 0;
-                    cost["Colorless"] += tax;
-                }
-                if (player.ColoredMana.CanPay(cost))
-                {
-                    isStackBusy = true; // BLOCK OTHER ACTIONS WHILE SORCERY IS ON STACK
-                    player.ColoredMana.Pay(cost);
-                    if (card.hasXCost)
-                    {
-                        card.xValue = player.ColoredMana.Total();
-                        if (card.xValue > 0)
-                            player.ColoredMana.SpendGeneric(card.xValue);
-                    }
-                    card.owner = player;
-                    player.Hand.Remove(card);
-                    UpdateUI();
-
-                    // Move visual to the stack zone
-                    visual.transform.SetParent(stackZone, false);
-                    visual.isInStack = true;
-                    visual.transform.localPosition = Vector3.zero;
-                    visual.transform.localRotation = Quaternion.identity;
-                    visual.transform.localScale = Vector3.one;
-                    SoundManager.Instance.PlaySound(SoundManager.Instance.cardPlay);
-                    StartCoroutine(ResolveSorceryAfterDelay(sorcery, visual, player));
-                }
-                else
-                {
-                    Debug.Log("Not enough colored mana to cast this sorcery.");
-                }
-            }
-            else if (card is ArtifactCard artifact)
-            {
-                var cost = GetManaCostBreakdown(artifact.manaCost, artifact.color);
-                int tax = GetOpponentSpellTax(player);
-                if (tax > 0)
-                {
-                    if (!cost.ContainsKey("Colorless"))
-                        cost["Colorless"] = 0;
-                    cost["Colorless"] += tax;
-                }
-                CardData artData = CardDatabase.GetCardData(card.cardName);
-                int reduction = (artData != null && artData.subtypes.Contains("Potion"))
-                    ? GetPotionCostReduction(player) : 0;
-                if (reduction > 0 && cost.ContainsKey("Colorless"))
-                    cost["Colorless"] = Mathf.Max(0, cost["Colorless"] - reduction);
-                if (player.ColoredMana.CanPay(cost))
-                {
-                    isStackBusy = true;
-                    player.ColoredMana.Pay(cost);
-                    if (card.hasXCost)
-                    {
-                        card.xValue = player.ColoredMana.Total();
-                        if (card.xValue > 0)
-                            player.ColoredMana.SpendGeneric(card.xValue);
-                    }
-                    card.owner = player;
-                    if (player == humanPlayer) UpdateUI();
-
-                    player.Hand.Remove(card);
-
-                    // Move visual to stack
-                    visual.transform.SetParent(stackZone, false);
-                    visual.isInStack = true;
-                    visual.transform.localPosition = Vector3.zero;
-                    visual.transform.localRotation = Quaternion.identity;
-                    visual.transform.localScale = Vector3.one;
-                    SoundManager.Instance.PlaySound(SoundManager.Instance.cardPlay);
-
-                    StartCoroutine(ResolveArtifactAfterDelay(artifact, visual, player));
-                }
-                else
-                {
-                    Debug.Log("Not enough colored mana to play this artifact.");
-                }
-            }
-            else if (card is AuraCard aura)
-            {
-                Debug.Log("Aura requires target — entering targeting mode.");
-                BeginAuraTargetSelection(aura, player, visual);
-                return;
-            }
-            else if (card is EnchantmentCard enchantment)
-            {
-                var cost = GetManaCostBreakdown(enchantment.manaCost, enchantment.color);
-                int tax = GetOpponentSpellTax(player);
-                if (tax > 0)
-                {
-                    if (!cost.ContainsKey("Colorless"))
-                        cost["Colorless"] = 0;
-                    cost["Colorless"] += tax;
-                }
-                if (player.ColoredMana.CanPay(cost))
-                {
-                    isStackBusy = true;
-                    player.ColoredMana.Pay(cost);
-                    if (card.hasXCost)
-                    {
-                        card.xValue = player.ColoredMana.Total();
-                        if (card.xValue > 0)
-                            player.ColoredMana.SpendGeneric(card.xValue);
-                    }
-                    card.owner = player;
-                    if (player == humanPlayer) UpdateUI();
-
-                    player.Hand.Remove(card);
-
-                    // Move visual to stack
-                    visual.transform.SetParent(stackZone, false);
-                    visual.isInStack = true;
-                    visual.transform.localPosition = Vector3.zero;
-                    visual.transform.localRotation = Quaternion.identity;
-                    visual.transform.localScale = Vector3.one;
-                    SoundManager.Instance.PlaySound(SoundManager.Instance.cardPlay);
-
-                    StartCoroutine(ResolveEnchantmentAfterDelay(enchantment, visual, player));
-                }
-                else
-                {
-                    Debug.Log("Not enough colored mana to play this enchantment.");
-                }
+                StartCoroutine(ResolveCreatureAfterDelay(creature, visual, player));
             }
             else
             {
-                Debug.LogWarning("Unhandled card type played: " + card.cardName);
+                Debug.Log("Not enough colored mana to cast this creature.");
             }
         }
+
+        else if (card is SorceryCard sorcery)
+        {
+            if (sorcery.requiresTarget)
+            {
+                Debug.Log("This sorcery requires a target — entering targeting mode.");
+                BeginTargetSelection(sorcery, player, visual);
+                return;
+            }
+
+            var cost = GetManaCostBreakdown(sorcery.manaCost, sorcery.color);
+            int tax = GetOpponentSpellTax(player);
+            if (tax > 0)
+            {
+                if (!cost.ContainsKey("Colorless"))
+                    cost["Colorless"] = 0;
+                cost["Colorless"] += tax;
+            }
+            if (player.ColoredMana.CanPay(cost))
+            {
+                isStackBusy = true; // BLOCK OTHER ACTIONS WHILE SORCERY IS ON STACK
+                player.ColoredMana.Pay(cost);
+                if (card.hasXCost)
+                {
+                    card.xValue = player.ColoredMana.Total();
+                    if (card.xValue > 0)
+                        player.ColoredMana.SpendGeneric(card.xValue);
+                }
+                card.owner = player;
+                player.Hand.Remove(card);
+                UpdateUI();
+
+                // Move visual to the stack zone
+                visual.transform.SetParent(stackZone, false);
+                visual.isInStack = true;
+                visual.transform.localPosition = Vector3.zero;
+                visual.transform.localRotation = Quaternion.identity;
+                visual.transform.localScale = Vector3.one;
+                SoundManager.Instance.PlaySound(SoundManager.Instance.cardPlay);
+                StartCoroutine(ResolveSorceryAfterDelay(sorcery, visual, player));
+            }
+            else
+            {
+                Debug.Log("Not enough colored mana to cast this sorcery.");
+            }
+        }
+        else if (card is ArtifactCard artifact)
+        {
+            var cost = GetManaCostBreakdown(artifact.manaCost, artifact.color);
+            int tax = GetOpponentSpellTax(player);
+            if (tax > 0)
+            {
+                if (!cost.ContainsKey("Colorless"))
+                    cost["Colorless"] = 0;
+                cost["Colorless"] += tax;
+            }
+            CardData artData = CardDatabase.GetCardData(card.cardName);
+            int reduction = (artData != null && artData.subtypes.Contains("Potion"))
+                ? GetPotionCostReduction(player) : 0;
+            if (reduction > 0 && cost.ContainsKey("Colorless"))
+                cost["Colorless"] = Mathf.Max(0, cost["Colorless"] - reduction);
+            if (player.ColoredMana.CanPay(cost))
+            {
+                isStackBusy = true;
+                player.ColoredMana.Pay(cost);
+                if (card.hasXCost)
+                {
+                    card.xValue = player.ColoredMana.Total();
+                    if (card.xValue > 0)
+                        player.ColoredMana.SpendGeneric(card.xValue);
+                }
+                card.owner = player;
+                if (player == humanPlayer) UpdateUI();
+
+                player.Hand.Remove(card);
+
+                // Move visual to stack
+                visual.transform.SetParent(stackZone, false);
+                visual.isInStack = true;
+                visual.transform.localPosition = Vector3.zero;
+                visual.transform.localRotation = Quaternion.identity;
+                visual.transform.localScale = Vector3.one;
+                SoundManager.Instance.PlaySound(SoundManager.Instance.cardPlay);
+
+                StartCoroutine(ResolveArtifactAfterDelay(artifact, visual, player));
+            }
+            else
+            {
+                Debug.Log("Not enough colored mana to play this artifact.");
+            }
+        }
+        else if (card is AuraCard aura)
+        {
+            Debug.Log("Aura requires target — entering targeting mode.");
+            BeginAuraTargetSelection(aura, player, visual);
+            return;
+        }
+        else if (card is EnchantmentCard enchantment)
+        {
+            var cost = GetManaCostBreakdown(enchantment.manaCost, enchantment.color);
+            int tax = GetOpponentSpellTax(player);
+            if (tax > 0)
+            {
+                if (!cost.ContainsKey("Colorless"))
+                    cost["Colorless"] = 0;
+                cost["Colorless"] += tax;
+            }
+            if (player.ColoredMana.CanPay(cost))
+            {
+                isStackBusy = true;
+                player.ColoredMana.Pay(cost);
+                if (card.hasXCost)
+                {
+                    card.xValue = player.ColoredMana.Total();
+                    if (card.xValue > 0)
+                        player.ColoredMana.SpendGeneric(card.xValue);
+                }
+                card.owner = player;
+                if (player == humanPlayer) UpdateUI();
+
+                player.Hand.Remove(card);
+
+                // Move visual to stack
+                visual.transform.SetParent(stackZone, false);
+                visual.isInStack = true;
+                visual.transform.localPosition = Vector3.zero;
+                visual.transform.localRotation = Quaternion.identity;
+                visual.transform.localScale = Vector3.one;
+                SoundManager.Instance.PlaySound(SoundManager.Instance.cardPlay);
+
+                StartCoroutine(ResolveEnchantmentAfterDelay(enchantment, visual, player));
+            }
+            else
+            {
+                Debug.Log("Not enough colored mana to play this enchantment.");
+            }
+        }
+        else
+        {
+            Debug.LogWarning("Unhandled card type played: " + card.cardName);
+        }
+    }
 
     public void TapLandForMana(LandCard land, Player player)
+    {
+        if (land.isTapped)
+            return;
+
+        land.isTapped = true;
+
+        var colors = CardDatabase.GetCardData(land.cardName).color;
+        string color = (colors != null && colors.Count > 0) ? colors[0] : "Colorless";
+
+        switch (color)
         {
-            if (land.isTapped)
-                return;
-
-            land.isTapped = true;
-
-            var colors = CardDatabase.GetCardData(land.cardName).color;
-            string color = (colors != null && colors.Count > 0) ? colors[0] : "Colorless";
-
-            switch (color)
-            {
-                case "White": player.ColoredMana.White++; break;
-                case "Blue": player.ColoredMana.Blue++; break;
-                case "Black": player.ColoredMana.Black++; break;
-                case "Red": player.ColoredMana.Red++; break;
-                case "Green": player.ColoredMana.Green++; break;
-                default:
-                    Debug.LogWarning($"Unknown land color for mana: {color}");
-                    break;
-            }
-
-            if (player == humanPlayer)
-            {
-                SoundManager.Instance.PlaySound(SoundManager.Instance.tap_for_mana);
-                ShowManaVFX(land);
-                UpdateUI();
-            }
+            case "White": player.ColoredMana.White++; break;
+            case "Blue": player.ColoredMana.Blue++; break;
+            case "Black": player.ColoredMana.Black++; break;
+            case "Red": player.ColoredMana.Red++; break;
+            case "Green": player.ColoredMana.Green++; break;
+            default:
+                Debug.LogWarning($"Unknown land color for mana: {color}");
+                break;
         }
+
+        if (player == humanPlayer)
+        {
+            SoundManager.Instance.PlaySound(SoundManager.Instance.tap_for_mana);
+            ShowManaVFX(land);
+            UpdateUI();
+        }
+    }
 
     private void ShowManaVFX(LandCard land)
+    {
+        CardVisual visual = FindCardVisual(land);
+        if (visual == null)
         {
-            CardVisual visual = FindCardVisual(land);
-            if (visual == null)
-            {
-                Debug.LogWarning("No visual found for land card " + land.cardName);
-                return;
-            }
-
-            Vector3 spawnPos = visual.transform.position;
-            spawnPos.z = 0f;
-
-            Sprite iconSprite = GetManaIconForCardName(land.cardName);
-
-            GameObject vfx = Instantiate(manaVFXPrefab, spawnPos, Quaternion.identity);
-            vfx.GetComponentInChildren<SpriteRenderer>().sprite = iconSprite;
-
-            Debug.Log("Spawning mana VFX at: " + spawnPos);
+            Debug.LogWarning("No visual found for land card " + land.cardName);
+            return;
         }
+
+        Vector3 spawnPos = visual.transform.position;
+        spawnPos.z = 0f;
+
+        Sprite iconSprite = GetManaIconForCardName(land.cardName);
+
+        GameObject vfx = Instantiate(manaVFXPrefab, spawnPos, Quaternion.identity);
+        vfx.GetComponentInChildren<SpriteRenderer>().sprite = iconSprite;
+
+        Debug.Log("Spawning mana VFX at: " + spawnPos);
+    }
 
     private Sprite GetManaIconForCardName(string cardName)
+    {
+        CardData data = CardDatabase.GetCardData(cardName);
+        if (data == null)
         {
-            CardData data = CardDatabase.GetCardData(cardName);
-            if (data == null)
-            {
-                Debug.LogWarning("No card data found for: " + cardName);
-                return null;
-            }
-
-            string primaryColor = (data.color != null && data.color.Count > 0) ? data.color[0] : "None";
-
-            switch (primaryColor)
-            {
-                case "Blue": return blueIcon;
-                case "White": return whiteIcon;
-                case "Black": return blackIcon;
-                case "Red": return redIcon;
-                case "Green": return greenIcon;
-                default:
-                    Debug.LogWarning("Unknown color: " + data.color);
-                    return null;
-            }
+            Debug.LogWarning("No card data found for: " + cardName);
+            return null;
         }
 
-    public void SendToGraveyard(Card card, Player owner, bool fromStack = false)
+        string primaryColor = (data.color != null && data.color.Count > 0) ? data.color[0] : "None";
+
+        switch (primaryColor)
         {
-            if (processedDeaths.Contains(card))
-                return;
+            case "Blue": return blueIcon;
+            case "White": return whiteIcon;
+            case "Black": return blackIcon;
+            case "Red": return redIcon;
+            case "Green": return greenIcon;
+            default:
+                Debug.LogWarning("Unknown color: " + data.color);
+                return null;
+        }
+    }
 
-            processedDeaths.Add(card);
+    public void SendToGraveyard(Card card, Player owner, bool fromStack = false)
+    {
+        if (processedDeaths.Contains(card))
+            return;
 
-            bool diedFromBattlefield = owner.Battlefield.Contains(card);
-            bool discardedFromHand = owner.Hand.Contains(card);
-            Player graveyardOwner = card.owner ?? owner;
+        processedDeaths.Add(card);
 
-            if (fromStack)
+        bool diedFromBattlefield = owner.Battlefield.Contains(card);
+        bool discardedFromHand = owner.Hand.Contains(card);
+        Player graveyardOwner = card.owner ?? owner;
+
+        if (fromStack)
+        {
+            Debug.Log($"{card.cardName} is going to the graveyard from the stack — skipping VFX.");
+
+            CardVisual stackVisual = FindCardVisual(card);
+            if (stackVisual != null)
             {
-                Debug.Log($"{card.cardName} is going to the graveyard from the stack — skipping VFX.");
+                activeCardVisuals.Remove(stackVisual);
+                Destroy(stackVisual.gameObject);
+            }
 
-                CardVisual stackVisual = FindCardVisual(card);
-                if (stackVisual != null)
-                {
-                    activeCardVisuals.Remove(stackVisual);
-                    Destroy(stackVisual.gameObject);
-                }
-
-                if (!card.isToken)
-                {
+            if (!card.isToken)
+            {
                 GameObject visualGO = Instantiate(cardPrefab,
                     graveyardOwner == humanPlayer ? playerGraveyardArea : aiGraveyardArea);
                 CardVisual stackGraveyardVisual = visualGO.GetComponent<CardVisual>();
@@ -634,145 +620,145 @@ public class GameManager : MonoBehaviour
         }
 
 
-            owner.Battlefield.Remove(card);
-            owner.Hand.Remove(card);
+        owner.Battlefield.Remove(card);
+        owner.Hand.Remove(card);
 
-            if (diedFromBattlefield && card is CreatureCard deadCreature)
+        if (diedFromBattlefield && card is CreatureCard deadCreature)
+        {
+            currentAttackers.Remove(deadCreature);
+            selectedAttackers.Remove(deadCreature);
+            if (selectedBlockerForBlocking == deadCreature)
+                selectedBlockerForBlocking = null;
+
+            foreach (var creature in humanPlayer.Battlefield.Concat(aiPlayer.Battlefield).OfType<CreatureCard>())
             {
-                currentAttackers.Remove(deadCreature);
-                selectedAttackers.Remove(deadCreature);
-                if (selectedBlockerForBlocking == deadCreature)
-                    selectedBlockerForBlocking = null;
+                creature.blockedByThisBlocker.Remove(deadCreature);
+                if (creature.blockingThisAttacker == deadCreature)
+                    creature.blockingThisAttacker = null;
 
-                foreach (var creature in humanPlayer.Battlefield.Concat(aiPlayer.Battlefield).OfType<CreatureCard>())
+                var vis = FindCardVisual(creature);
+                if (vis != null)
+                    vis.UpdateVisual();
+            }
+        }
+
+        if (discardedFromHand)
+        {
+            NotifyOpponentDiscard(owner);
+            NotifyPlayerDiscard(owner);
+        }
+
+        Debug.Log($"{card.cardName} is being sent to the graveyard.");
+
+        if (card is CreatureCard && (diedFromBattlefield || discardedFromHand))
+        {
+            NotifyCreatureDiesOrDiscarded(card, owner);
+        }
+        if (card is CreatureCard && diedFromBattlefield)
+        {
+            NotifyCreatureDies(card, owner);
+        }
+
+        if (diedFromBattlefield)
+        {
+            card.OnLeavePlay(owner);
+            if (card is LandCard)
+                NotifyLandLeft(card, owner);
+
+            if (card is CreatureCard leftCreature)
+            {
+                foreach (var player in new[] { humanPlayer, aiPlayer })
                 {
-                    creature.blockedByThisBlocker.Remove(deadCreature);
-                    if (creature.blockingThisAttacker == deadCreature)
-                        creature.blockingThisAttacker = null;
+                    var attached = player.Battlefield
+                        .OfType<AuraCard>()
+                        .Where(a => a.attachedTo == leftCreature)
+                        .ToList();
 
-                    var vis = FindCardVisual(creature);
-                    if (vis != null)
-                        vis.UpdateVisual();
-                }
-            }
+                    foreach (var aura in attached)
+                        SendToGraveyard(aura, player);
 
-            if (discardedFromHand)
-            {
-                NotifyOpponentDiscard(owner);
-                NotifyPlayerDiscard(owner);
-            }
+                    var equips = player.Battlefield
+                        .OfType<EquipmentCard>()
+                        .Where(e => e.equippedTo == leftCreature)
+                        .ToList();
 
-            Debug.Log($"{card.cardName} is being sent to the graveyard.");
-
-            if (card is CreatureCard && (diedFromBattlefield || discardedFromHand))
-            {
-                NotifyCreatureDiesOrDiscarded(card, owner);
-            }
-            if (card is CreatureCard && diedFromBattlefield)
-            {
-                NotifyCreatureDies(card, owner);
-            }
-
-            if (diedFromBattlefield)
-            {
-                card.OnLeavePlay(owner);
-                if (card is LandCard)
-                    NotifyLandLeft(card, owner);
-
-                if (card is CreatureCard leftCreature)
-                {
-                    foreach (var player in new[] { humanPlayer, aiPlayer })
+                    foreach (var eq in equips)
                     {
-                        var attached = player.Battlefield
-                            .OfType<AuraCard>()
-                            .Where(a => a.attachedTo == leftCreature)
-                            .ToList();
-
-                        foreach (var aura in attached)
-                            SendToGraveyard(aura, player);
-
-                        var equips = player.Battlefield
-                            .OfType<EquipmentCard>()
-                            .Where(e => e.equippedTo == leftCreature)
-                            .ToList();
-
-                        foreach (var eq in equips)
-                        {
-                            eq.Unequip();
-                            FindCardVisual(eq)?.UpdateVisual();
-                        }
+                        eq.Unequip();
+                        FindCardVisual(eq)?.UpdateVisual();
                     }
                 }
             }
+        }
 
-            card.isTapped = false;
+        card.isTapped = false;
 
-            CardVisual visual = FindCardVisual(card); // <-- Moved up
+        CardVisual visual = FindCardVisual(card); // <-- Moved up
+        if (visual != null)
+            visual.EnableTargetingHighlight(false); // ensure highlight removed
+        if (visual != null && visual.tapIcon != null)
+            visual.tapIcon.SetActive(false);
+
+        if (discardedFromHand && visual != null)
+        {
+            StartCoroutine(ShowHandDiscardVFX(card, owner, visual));
+            return;
+        }
+
+        if (card is CreatureCard thisDeadCreature)
+        {
+            thisDeadCreature.hasSummoningSickness = false;
+            thisDeadCreature.toughness = thisDeadCreature.baseToughness;
+
             if (visual != null)
-                visual.EnableTargetingHighlight(false); // ensure highlight removed
-            if (visual != null && visual.tapIcon != null)
-                visual.tapIcon.SetActive(false);
-
-            if (discardedFromHand && visual != null)
             {
-                StartCoroutine(ShowHandDiscardVFX(card, owner, visual));
-                return;
+                visual.sicknessText.text = "";
             }
 
-            if (card is CreatureCard thisDeadCreature)
+            if (card.isToken && diedFromBattlefield)
             {
-                thisDeadCreature.hasSummoningSickness = false;
-                thisDeadCreature.toughness = thisDeadCreature.baseToughness;
-
                 if (visual != null)
                 {
-                    visual.sicknessText.text = "";
-                }
-
-                if (card.isToken && diedFromBattlefield)
-                {
-                    if (visual != null)
-                    {
-                        StartCoroutine(ShowDeathVFXAndDelayLayout(card, owner, visual));
-                    }
-                    return;
-                }
-
-                if (diedFromBattlefield && visual != null)
-                {
                     StartCoroutine(ShowDeathVFXAndDelayLayout(card, owner, visual));
-                    return;
                 }
-            }
-
-            if (card is ArtifactCard && diedFromBattlefield && visual != null)
-            {
-                StartCoroutine(ShowDeathVFXAndDelayLayout(card, owner, visual, artifactDeathPrefab));
                 return;
             }
 
-            // Fallback: create graveyard visual normally
-            CardVisual graveyardVisual = FindCardVisual(card);
-            if (graveyardVisual == null)
+            if (diedFromBattlefield && visual != null)
             {
-                GameObject visualGO = Instantiate(cardPrefab,
-                    graveyardOwner == humanPlayer ? playerGraveyardArea : aiGraveyardArea);
-                graveyardVisual = visualGO.GetComponent<CardVisual>();
-                graveyardVisual.Setup(card, this);
-                activeCardVisuals.Add(graveyardVisual);
+                StartCoroutine(ShowDeathVFXAndDelayLayout(card, owner, visual));
+                return;
             }
-
-            graveyardVisual.transform.SetParent(graveyardOwner == humanPlayer ? playerGraveyardArea : aiGraveyardArea);
-            graveyardVisual.transform.localPosition = Vector3.zero;
-            graveyardVisual.UpdateGraveyardVisual();
-            // Ensure graveyard UI elements stay above the cards
-            // Newest card should appear on top
-            graveyardVisual.transform.SetAsLastSibling();
-            EnsureGraveyardCounterOnTop(graveyardOwner);
-
-            graveyardOwner.Graveyard.Add(card);
-            UpdateUI();
         }
+
+        if (card is ArtifactCard && diedFromBattlefield && visual != null)
+        {
+            StartCoroutine(ShowDeathVFXAndDelayLayout(card, owner, visual, artifactDeathPrefab));
+            return;
+        }
+
+        // Fallback: create graveyard visual normally
+        CardVisual graveyardVisual = FindCardVisual(card);
+        if (graveyardVisual == null)
+        {
+            GameObject visualGO = Instantiate(cardPrefab,
+                graveyardOwner == humanPlayer ? playerGraveyardArea : aiGraveyardArea);
+            graveyardVisual = visualGO.GetComponent<CardVisual>();
+            graveyardVisual.Setup(card, this);
+            activeCardVisuals.Add(graveyardVisual);
+        }
+
+        graveyardVisual.transform.SetParent(graveyardOwner == humanPlayer ? playerGraveyardArea : aiGraveyardArea);
+        graveyardVisual.transform.localPosition = Vector3.zero;
+        graveyardVisual.UpdateGraveyardVisual();
+        // Ensure graveyard UI elements stay above the cards
+        // Newest card should appear on top
+        graveyardVisual.transform.SetAsLastSibling();
+        EnsureGraveyardCounterOnTop(graveyardOwner);
+
+        graveyardOwner.Graveyard.Add(card);
+        UpdateUI();
+    }
 
     public (int playerDamage, int aiDamage) ResolveCombat()
     {
@@ -1014,218 +1000,218 @@ public class GameManager : MonoBehaviour
     }
 
     public CardVisual FindCardVisual(Card card)
-        {
-            return activeCardVisuals.Find(cv => cv.linkedCard == card);
-        }
+    {
+        return activeCardVisuals.Find(cv => cv.linkedCard == card);
+    }
 
     public IEnumerator ResolveSorceryAfterDelay(SorceryCard sorcery, CardVisual visual, Player caster)
+    {
+        yield return new WaitForSeconds(2f);
+
+        // PREVENT executing if required target is missing
+        if (sorcery.requiresTarget && sorcery.chosenTarget == null && sorcery.chosenPlayerTarget == null)
         {
-            yield return new WaitForSeconds(2f);
+            Debug.LogWarning($"[ResolveSorceryAfterDelay] {sorcery.cardName} requires a target, but none was set. Aborting cast.");
 
-            // PREVENT executing if required target is missing
-            if (sorcery.requiresTarget && sorcery.chosenTarget == null && sorcery.chosenPlayerTarget == null)
+            // Destroy visual
+            if (visual != null)
             {
-                Debug.LogWarning($"[ResolveSorceryAfterDelay] {sorcery.cardName} requires a target, but none was set. Aborting cast.");
-
-                // Destroy visual
-                if (visual != null)
-                {
-                    GameManager.Instance.activeCardVisuals.Remove(visual);
-                    GameObject.Destroy(visual.gameObject);
-                }
-
-                isStackBusy = false;
-                yield break;
+                GameManager.Instance.activeCardVisuals.Remove(visual);
+                GameObject.Destroy(visual.gameObject);
             }
 
-            if (sorcery.chosenTarget != null)
-            {
-                sorcery.ResolveEffect(caster, sorcery.chosenTarget);
-            }
-            else if (sorcery.chosenPlayerTarget != null)
-            {
-                sorcery.ResolveEffectOnPlayer(caster, sorcery.chosenPlayerTarget);
-            }
-            else
-            {
-                sorcery.ResolveEffect(caster);
-            }
-
-            SendToGraveyard(sorcery, caster, fromStack: true);
-            AwardFavouriteCardCoins(sorcery, caster);
-
-            if (caster == aiPlayer && visual != null)
-            {
-                activeCardVisuals.Remove(visual);
-                Destroy(visual.gameObject);
-            }
-
-            UpdateUI();
             isStackBusy = false;
-            CheckForGameEnd();
-
-            if (caster == aiPlayer && TurnSystem.Instance.waitingToResumeAI && pendingStackEffects == 0)
-            {
-                Debug.Log("Resuming AI phase after stack.");
-                TurnSystem.Instance.waitingToResumeAI = false;
-                TurnSystem.Instance.RunSpecificPhase(TurnSystem.Instance.lastPhaseBeforeStack);
-            }
+            yield break;
         }
 
-    public IEnumerator ResolveCreatureAfterDelay(CreatureCard creature, CardVisual visual, Player caster)
+        if (sorcery.chosenTarget != null)
         {
-            yield return new WaitForSeconds(2f);
+            sorcery.ResolveEffect(caster, sorcery.chosenTarget);
+        }
+        else if (sorcery.chosenPlayerTarget != null)
+        {
+            sorcery.ResolveEffectOnPlayer(caster, sorcery.chosenPlayerTarget);
+        }
+        else
+        {
+            sorcery.ResolveEffect(caster);
+        }
 
-            caster.Battlefield.Add(creature);
+        SendToGraveyard(sorcery, caster, fromStack: true);
+        AwardFavouriteCardCoins(sorcery, caster);
 
-            if (creature.keywordAbilities.Contains(KeywordAbility.Haste))
-                creature.hasSummoningSickness = false;
-            else
-                creature.hasSummoningSickness = true;
+        if (caster == aiPlayer && visual != null)
+        {
+            activeCardVisuals.Remove(visual);
+            Destroy(visual.gameObject);
+        }
 
-            if (creature.entersTapped || IsAllPermanentsEnterTappedActive())
+        UpdateUI();
+        isStackBusy = false;
+        CheckForGameEnd();
+
+        if (caster == aiPlayer && TurnSystem.Instance.waitingToResumeAI && pendingStackEffects == 0)
+        {
+            Debug.Log("Resuming AI phase after stack.");
+            TurnSystem.Instance.waitingToResumeAI = false;
+            TurnSystem.Instance.RunSpecificPhase(TurnSystem.Instance.lastPhaseBeforeStack);
+        }
+    }
+
+    public IEnumerator ResolveCreatureAfterDelay(CreatureCard creature, CardVisual visual, Player caster)
+    {
+        yield return new WaitForSeconds(2f);
+
+        caster.Battlefield.Add(creature);
+
+        if (creature.keywordAbilities.Contains(KeywordAbility.Haste))
+            creature.hasSummoningSickness = false;
+        else
+            creature.hasSummoningSickness = true;
+
+        if (creature.entersTapped || IsAllPermanentsEnterTappedActive())
+        {
+            creature.isTapped = true;
+            Debug.Log($"{creature.cardName} enters tapped (due to static effect).");
+        }
+
+        Transform battlefield = caster == humanPlayer ? playerBattlefieldArea : aiBattlefieldArea;
+        visual.transform.SetParent(battlefield, false);
+        visual.isInStack = false;
+        visual.isInBattlefield = true;
+        if (!activeCardVisuals.Contains(visual))
+            activeCardVisuals.Add(visual);
+        visual.UpdateVisual();
+
+        creature.OnEnterPlay(caster);
+
+        if (caster == aiPlayer && creature.abilities != null)
+        {
+            foreach (var ability in creature.abilities)
             {
-                creature.isTapped = true;
-                Debug.Log($"{creature.cardName} enters tapped (due to static effect).");
-            }
-
-            Transform battlefield = caster == humanPlayer ? playerBattlefieldArea : aiBattlefieldArea;
-            visual.transform.SetParent(battlefield, false);
-            visual.isInStack = false;
-            visual.isInBattlefield = true;
-            if (!activeCardVisuals.Contains(visual))
-                activeCardVisuals.Add(visual);
-            visual.UpdateVisual();
-
-            creature.OnEnterPlay(caster);
-
-            if (caster == aiPlayer && creature.abilities != null)
-            {
-                foreach (var ability in creature.abilities)
+                if (ability.timing == TriggerTiming.OnEnter && ability.requiresTarget)
                 {
-                    if (ability.timing == TriggerTiming.OnEnter && ability.requiresTarget)
-                    {
-                        Player opponent = GetOpponentOf(caster);
-                        Card target = opponent.Battlefield
-                            .Where(c =>
-                                (ability.requiredTargetType == SorceryCard.TargetType.Creature && c is CreatureCard creatureT &&
-                                    !(ability.excludeArtifactCreatures && creatureT.color.Contains("Artifact"))) ||
-                                (ability.requiredTargetType == SorceryCard.TargetType.Artifact && c is ArtifactCard) ||
-                                (ability.requiredTargetType == SorceryCard.TargetType.Enchantment && c is EnchantmentCard) ||
-                                (ability.requiredTargetType == SorceryCard.TargetType.Land && c is LandCard))
-                            .OrderByDescending(c => CardDatabase.GetCardData(c.cardName)?.manaCost ?? 0)
-                            .FirstOrDefault();
+                    Player opponent = GetOpponentOf(caster);
+                    Card target = opponent.Battlefield
+                        .Where(c =>
+                            (ability.requiredTargetType == SorceryCard.TargetType.Creature && c is CreatureCard creatureT &&
+                                !(ability.excludeArtifactCreatures && creatureT.color.Contains("Artifact"))) ||
+                            (ability.requiredTargetType == SorceryCard.TargetType.Artifact && c is ArtifactCard) ||
+                            (ability.requiredTargetType == SorceryCard.TargetType.Enchantment && c is EnchantmentCard) ||
+                            (ability.requiredTargetType == SorceryCard.TargetType.Land && c is LandCard))
+                        .OrderByDescending(c => CardDatabase.GetCardData(c.cardName)?.manaCost ?? 0)
+                        .FirstOrDefault();
 
-                        if (target != null)
-                        {
-                            QueueTriggeredAbility(ability, caster, creature, target);
-                            Debug.Log($"[AI ETB] {creature.cardName} targets {target.cardName}");
-                        }
+                    if (target != null)
+                    {
+                        QueueTriggeredAbility(ability, caster, creature, target);
+                        Debug.Log($"[AI ETB] {creature.cardName} targets {target.cardName}");
                     }
                 }
             }
-
-            NotifyCreatureEntered(creature, caster);
-            if (creature.color.Contains("Artifact"))
-                NotifyArtifactEntered(creature, caster);
-
-            AwardFavouriteCardCoins(creature, caster);
-
-            SoundManager.Instance.PlaySound(SoundManager.Instance.playCreature);
-
-            UpdateUI();
-            isStackBusy = false;
-            CheckForGameEnd();
-
-            if (caster == aiPlayer && TurnSystem.Instance.waitingToResumeAI && pendingStackEffects == 0)
-            {
-                Debug.Log("Resuming AI phase after stack.");
-                TurnSystem.Instance.waitingToResumeAI = false;
-                TurnSystem.Instance.RunSpecificPhase(TurnSystem.Instance.lastPhaseBeforeStack);
-            }
         }
+
+        NotifyCreatureEntered(creature, caster);
+        if (creature.color.Contains("Artifact"))
+            NotifyArtifactEntered(creature, caster);
+
+        AwardFavouriteCardCoins(creature, caster);
+
+        SoundManager.Instance.PlaySound(SoundManager.Instance.playCreature);
+
+        UpdateUI();
+        isStackBusy = false;
+        CheckForGameEnd();
+
+        if (caster == aiPlayer && TurnSystem.Instance.waitingToResumeAI && pendingStackEffects == 0)
+        {
+            Debug.Log("Resuming AI phase after stack.");
+            TurnSystem.Instance.waitingToResumeAI = false;
+            TurnSystem.Instance.RunSpecificPhase(TurnSystem.Instance.lastPhaseBeforeStack);
+        }
+    }
 
     public IEnumerator ResolveArtifactAfterDelay(ArtifactCard artifact, CardVisual visual, Player caster)
+    {
+        yield return new WaitForSeconds(2f);
+
+        caster.Battlefield.Add(artifact);
+
+        if (artifact.entersTapped || IsAllPermanentsEnterTappedActive())
         {
-            yield return new WaitForSeconds(2f);
-
-            caster.Battlefield.Add(artifact);
-
-            if (artifact.entersTapped || IsAllPermanentsEnterTappedActive())
-            {
-                artifact.isTapped = true;
-                Debug.Log($"{artifact.cardName} enters tapped (due to static effect).");
-            }
-
-            Transform area = caster == humanPlayer ? playerArtifactArea : aiArtifactArea;
-            visual.transform.SetParent(area, false);
-            visual.isInStack = false;
-            visual.isInBattlefield = true;
-            if (!activeCardVisuals.Contains(visual))
-                activeCardVisuals.Add(visual);
-            visual.UpdateVisual();
-
-            artifact.OnEnterPlay(caster);
-            NotifyArtifactEntered(artifact, caster);
-
-            AwardFavouriteCardCoins(artifact, caster);
-
-            SoundManager.Instance.PlaySound(SoundManager.Instance.playArtifact);
-
-            UpdateUI();
-            isStackBusy = false;
-            CheckForGameEnd();
-
-            if (caster == aiPlayer && TurnSystem.Instance.waitingToResumeAI && pendingStackEffects == 0)
-            {
-                Debug.Log("Resuming AI phase after stack.");
-                TurnSystem.Instance.waitingToResumeAI = false;
-                TurnSystem.Instance.RunSpecificPhase(TurnSystem.Instance.lastPhaseBeforeStack);
-            }
+            artifact.isTapped = true;
+            Debug.Log($"{artifact.cardName} enters tapped (due to static effect).");
         }
+
+        Transform area = caster == humanPlayer ? playerArtifactArea : aiArtifactArea;
+        visual.transform.SetParent(area, false);
+        visual.isInStack = false;
+        visual.isInBattlefield = true;
+        if (!activeCardVisuals.Contains(visual))
+            activeCardVisuals.Add(visual);
+        visual.UpdateVisual();
+
+        artifact.OnEnterPlay(caster);
+        NotifyArtifactEntered(artifact, caster);
+
+        AwardFavouriteCardCoins(artifact, caster);
+
+        SoundManager.Instance.PlaySound(SoundManager.Instance.playArtifact);
+
+        UpdateUI();
+        isStackBusy = false;
+        CheckForGameEnd();
+
+        if (caster == aiPlayer && TurnSystem.Instance.waitingToResumeAI && pendingStackEffects == 0)
+        {
+            Debug.Log("Resuming AI phase after stack.");
+            TurnSystem.Instance.waitingToResumeAI = false;
+            TurnSystem.Instance.RunSpecificPhase(TurnSystem.Instance.lastPhaseBeforeStack);
+        }
+    }
 
     public IEnumerator ResolveEnchantmentAfterDelay(EnchantmentCard enchantment, CardVisual visual, Player caster)
+    {
+        yield return new WaitForSeconds(2f);
+
+        caster.Battlefield.Add(enchantment);
+
+        if (enchantment.entersTapped || IsAllPermanentsEnterTappedActive())
         {
-            yield return new WaitForSeconds(2f);
-
-            caster.Battlefield.Add(enchantment);
-
-            if (enchantment.entersTapped || IsAllPermanentsEnterTappedActive())
-            {
-                enchantment.isTapped = true;
-                Debug.Log($"{enchantment.cardName} enters tapped (due to static effect).");
-            }
-
-            Transform area = caster == humanPlayer ? playerEnchantmentArea : aiEnchantmentArea;
-            visual.transform.SetParent(area, false);
-            visual.isInStack = false;
-            visual.isInBattlefield = true;
-            if (!activeCardVisuals.Contains(visual))
-                activeCardVisuals.Add(visual);
-            visual.UpdateVisual();
-
-            enchantment.OnEnterPlay(caster);
-            NotifyEnchantmentEntered(enchantment, caster);
-
-            AwardFavouriteCardCoins(enchantment, caster);
-
-            SoundManager.Instance.PlaySound(SoundManager.Instance.playArtifact);
-
-            UpdateUI();
-            isStackBusy = false;
-            CheckForGameEnd();
-
-            if (caster == aiPlayer && TurnSystem.Instance.waitingToResumeAI && pendingStackEffects == 0)
-            {
-                Debug.Log("Resuming AI phase after stack.");
-                TurnSystem.Instance.waitingToResumeAI = false;
-                TurnSystem.Instance.RunSpecificPhase(TurnSystem.Instance.lastPhaseBeforeStack);
-            }
+            enchantment.isTapped = true;
+            Debug.Log($"{enchantment.cardName} enters tapped (due to static effect).");
         }
 
-        public IEnumerator ResolveAuraAfterDelay(AuraCard aura, CardVisual visual, Player caster)
+        Transform area = caster == humanPlayer ? playerEnchantmentArea : aiEnchantmentArea;
+        visual.transform.SetParent(area, false);
+        visual.isInStack = false;
+        visual.isInBattlefield = true;
+        if (!activeCardVisuals.Contains(visual))
+            activeCardVisuals.Add(visual);
+        visual.UpdateVisual();
+
+        enchantment.OnEnterPlay(caster);
+        NotifyEnchantmentEntered(enchantment, caster);
+
+        AwardFavouriteCardCoins(enchantment, caster);
+
+        SoundManager.Instance.PlaySound(SoundManager.Instance.playArtifact);
+
+        UpdateUI();
+        isStackBusy = false;
+        CheckForGameEnd();
+
+        if (caster == aiPlayer && TurnSystem.Instance.waitingToResumeAI && pendingStackEffects == 0)
         {
-            yield return new WaitForSeconds(2f);
+            Debug.Log("Resuming AI phase after stack.");
+            TurnSystem.Instance.waitingToResumeAI = false;
+            TurnSystem.Instance.RunSpecificPhase(TurnSystem.Instance.lastPhaseBeforeStack);
+        }
+    }
+
+    public IEnumerator ResolveAuraAfterDelay(AuraCard aura, CardVisual visual, Player caster)
+    {
+        yield return new WaitForSeconds(2f);
 
         caster.Battlefield.Add(aura);
         aura.OnEnterPlay(caster);
@@ -1233,49 +1219,49 @@ public class GameManager : MonoBehaviour
 
         AwardFavouriteCardCoins(aura, caster);
 
-            if (!caster.Battlefield.Contains(aura))
-            {
-                // Aura may have destroyed itself via its effect
-                UpdateUI();
-                isStackBusy = false;
-                if (caster == aiPlayer && TurnSystem.Instance.waitingToResumeAI && pendingStackEffects == 0)
-                {
-                    TurnSystem.Instance.waitingToResumeAI = false;
-                    TurnSystem.Instance.RunSpecificPhase(TurnSystem.Instance.lastPhaseBeforeStack);
-                }
-                yield break;
-            }
-
-            if (aura.entersTapped || IsAllPermanentsEnterTappedActive())
-            {
-                aura.isTapped = true;
-                Debug.Log($"{aura.cardName} enters tapped (due to static effect).");
-            }
-
-            Transform area = caster == humanPlayer ? playerEnchantmentArea : aiEnchantmentArea;
-            if (visual != null)
-            {
-                visual.transform.SetParent(area, false);
-                visual.isInStack = false;
-                visual.isInBattlefield = true;
-                if (!activeCardVisuals.Contains(visual))
-                    activeCardVisuals.Add(visual);
-                visual.UpdateVisual();
-            }
-
-            SoundManager.Instance.PlaySound(SoundManager.Instance.playArtifact);
-
+        if (!caster.Battlefield.Contains(aura))
+        {
+            // Aura may have destroyed itself via its effect
             UpdateUI();
             isStackBusy = false;
-            CheckForGameEnd();
-
             if (caster == aiPlayer && TurnSystem.Instance.waitingToResumeAI && pendingStackEffects == 0)
             {
-                Debug.Log("Resuming AI phase after stack.");
                 TurnSystem.Instance.waitingToResumeAI = false;
                 TurnSystem.Instance.RunSpecificPhase(TurnSystem.Instance.lastPhaseBeforeStack);
             }
+            yield break;
         }
+
+        if (aura.entersTapped || IsAllPermanentsEnterTappedActive())
+        {
+            aura.isTapped = true;
+            Debug.Log($"{aura.cardName} enters tapped (due to static effect).");
+        }
+
+        Transform area = caster == humanPlayer ? playerEnchantmentArea : aiEnchantmentArea;
+        if (visual != null)
+        {
+            visual.transform.SetParent(area, false);
+            visual.isInStack = false;
+            visual.isInBattlefield = true;
+            if (!activeCardVisuals.Contains(visual))
+                activeCardVisuals.Add(visual);
+            visual.UpdateVisual();
+        }
+
+        SoundManager.Instance.PlaySound(SoundManager.Instance.playArtifact);
+
+        UpdateUI();
+        isStackBusy = false;
+        CheckForGameEnd();
+
+        if (caster == aiPlayer && TurnSystem.Instance.waitingToResumeAI && pendingStackEffects == 0)
+        {
+            Debug.Log("Resuming AI phase after stack.");
+            TurnSystem.Instance.waitingToResumeAI = false;
+            TurnSystem.Instance.RunSpecificPhase(TurnSystem.Instance.lastPhaseBeforeStack);
+        }
+    }
 
     public IEnumerator ResolveTriggeredAbilityOnStack(
         CardAbility ability,
@@ -1320,7 +1306,7 @@ public class GameManager : MonoBehaviour
         int gained = owner.Life - oldLife;
         if (gained > 0)
         {
-            ShowFloatingHeal(gained, owner == humanPlayer ? playerLifeContainer : enemyLifeContainer);
+            VisualEffectManager.Instance.ShowFloatingHealForPlayer(gained, owner == humanPlayer);
         }
 
         if (deadCreature != null)
@@ -1390,8 +1376,8 @@ public class GameManager : MonoBehaviour
                 case ActivatedAbility.TapToPlague:
                     humanPlayer.Life -= artifact.plagueAmount;
                     aiPlayer.Life -= artifact.plagueAmount;
-                    ShowFloatingDamage(artifact.plagueAmount, playerLifeContainer);
-                    ShowFloatingDamage(artifact.plagueAmount, enemyLifeContainer);
+                    VisualEffectManager.Instance.ShowFloatingDamageForPlayer(artifact.plagueAmount, true);
+                    VisualEffectManager.Instance.ShowFloatingDamageForPlayer(artifact.plagueAmount, false);
                     SoundManager.Instance.PlaySound(SoundManager.Instance.plague);
                     ShowBloodSplatVFX(artifact);
                     break;
@@ -1495,10 +1481,7 @@ public class GameManager : MonoBehaviour
             case ActivatedAbility.TapToLoseLife:
                 Player opponent = GetOpponentOf(controller);
                 opponent.Life -= creature.tapLifeLossAmount;
-                if (controller == humanPlayer)
-                    ShowFloatingDamage(creature.tapLifeLossAmount, enemyLifeContainer);
-                else
-                    ShowFloatingDamage(creature.tapLifeLossAmount, playerLifeContainer);
+                VisualEffectManager.Instance.ShowFloatingDamageForPlayer(creature.tapLifeLossAmount, controller == humanPlayer);
                 SoundManager.Instance.PlaySound(SoundManager.Instance.plague);
                 ShowBloodSplatVFX(creature);
                 break;
@@ -2183,10 +2166,7 @@ public class GameManager : MonoBehaviour
         SoundManager.Instance.PlaySound(SoundManager.Instance.plague);
         ShowBloodSplatVFX(creature);
 
-        if (owner == humanPlayer)
-            ShowFloatingDamage(creature.tapLifeLossAmount, enemyLifeContainer);
-        else
-            ShowFloatingDamage(creature.tapLifeLossAmount, playerLifeContainer);
+        VisualEffectManager.Instance.ShowFloatingDamageForPlayer(creature.tapLifeLossAmount, owner != humanPlayer);
 
         UpdateUI();
         CheckForGameEnd();
@@ -2407,13 +2387,13 @@ public class GameManager : MonoBehaviour
     }
 
     private void UpdateManaIcon(Image icon, TMP_Text label, int amount)
-        {
-            if (icon != null)
-                icon.color = (amount > 0) ? Color.white : Color.black;
+    {
+        if (icon != null)
+            icon.color = (amount > 0) ? Color.white : Color.black;
 
-            if (label != null)
-                label.text = amount.ToString();
-        }
+        if (label != null)
+            label.text = amount.ToString();
+    }
 
     // Ensures the graveyard count text stays above newly added cards
     private void EnsureGraveyardCounterOnTop(Player owner)
@@ -2431,53 +2411,53 @@ public class GameManager : MonoBehaviour
     }
 
     public void RefreshGraveyardVisuals(Player player)
+    {
+        var graveyardVisuals = activeCardVisuals
+            .Where(cv => cv.isInGraveyard && GetOwnerOfCard(cv.linkedCard) == player)
+            .ToList();
+
+        foreach (var visual in graveyardVisuals)
         {
-            var graveyardVisuals = activeCardVisuals
-                .Where(cv => cv.isInGraveyard && GetOwnerOfCard(cv.linkedCard) == player)
-                .ToList();
-
-            foreach (var visual in graveyardVisuals)
-            {
-                activeCardVisuals.Remove(visual);
-                Destroy(visual.gameObject);
-            }
-
-            foreach (var card in player.Graveyard)
-            {
-                if (card.isToken) continue;
-
-                GameObject visualGO = Instantiate(cardPrefab,
-                    player == humanPlayer ? playerGraveyardArea : aiGraveyardArea);
-                CardVisual graveyardVisual = visualGO.GetComponent<CardVisual>();
-                graveyardVisual.Setup(card, this);
-                graveyardVisual.transform.localPosition = Vector3.zero;
-                graveyardVisual.UpdateGraveyardVisual();
-                // Keep UI overlay elements above the cards
-                // Newest card should appear on top
-                graveyardVisual.transform.SetAsLastSibling();
-                EnsureGraveyardCounterOnTop(player);
-
-                activeCardVisuals.Add(graveyardVisual);
-            }
+            activeCardVisuals.Remove(visual);
+            Destroy(visual.gameObject);
         }
+
+        foreach (var card in player.Graveyard)
+        {
+            if (card.isToken) continue;
+
+            GameObject visualGO = Instantiate(cardPrefab,
+                player == humanPlayer ? playerGraveyardArea : aiGraveyardArea);
+            CardVisual graveyardVisual = visualGO.GetComponent<CardVisual>();
+            graveyardVisual.Setup(card, this);
+            graveyardVisual.transform.localPosition = Vector3.zero;
+            graveyardVisual.UpdateGraveyardVisual();
+            // Keep UI overlay elements above the cards
+            // Newest card should appear on top
+            graveyardVisual.transform.SetAsLastSibling();
+            EnsureGraveyardCounterOnTop(player);
+
+            activeCardVisuals.Add(graveyardVisual);
+        }
+    }
 
     public void ShowPlayerGraveyard()
-        {
-            if (graveyardUIManager != null)
-                graveyardUIManager.Open(humanPlayer.Graveyard);
-        }
+    {
+        if (graveyardUIManager != null)
+            graveyardUIManager.Open(humanPlayer.Graveyard);
+    }
 
     public void ShowOpponentGraveyard()
-        {
-            if (graveyardUIManager != null)
-                graveyardUIManager.Open(aiPlayer.Graveyard);
-        }
+    {
+        if (graveyardUIManager != null)
+            graveyardUIManager.Open(aiPlayer.Graveyard);
+    }
 
     public void ClosePlayerGraveyard()
-        {
-            if (graveyardUIManager != null)
-                graveyardUIManager.Close();
-        }
+    {
+        if (graveyardUIManager != null)
+            graveyardUIManager.Close();
+    }
 
     public void WinBattle()
     {
@@ -2648,63 +2628,70 @@ public class GameManager : MonoBehaviour
 
         if (showVFX)
         {
-            if (player == humanPlayer)
-                ShowFloatingHeal(amount, playerLifeContainer);
-            else
-                ShowFloatingHeal(amount, enemyLifeContainer);
+            VisualEffectManager.Instance.ShowFloatingHealForPlayer(amount, player == humanPlayer);
         }
     }
 
+    public void LoseLife(Player player, int amount, bool showVFX = true)
+    {
+        player.ChangeLife(amount);
+        UpdateUI();
 
+        if (showVFX)
+        {
+            VisualEffectManager.Instance.ShowFloatingDamageForPlayer(amount, player == humanPlayer);
+
+        }
+    }
 
     public void BeginTargetSelection(SorceryCard sorcery, Player caster, CardVisual visual)
-        {
-            targetingSorcery = sorcery;
-            targetingPlayer = caster;
-            targetingVisual = visual;
-            isTargetingMode = true;
+    {
+        targetingSorcery = sorcery;
+        targetingPlayer = caster;
+        targetingVisual = visual;
+        isTargetingMode = true;
 
-            if (!sorcery.requiresTarget)
+        if (!sorcery.requiresTarget)
+        {
+            Debug.LogWarning("BeginTargetSelection called for non-targeting sorcery.");
+            return;
+        }
+
+        // Highlight the selected card
+        if (visual != null)
+            visual.EnableTargetingHighlight(true);
+
+        // Check if any valid targets exist (but do not highlight anything)
+        foreach (var cv in activeCardVisuals)
+        {
+            if (cv == null || cv.linkedCard == null)
+                continue;
+
+            Card target = cv.linkedCard;
+
+            bool correctType =
+                (sorcery.requiredTargetType == SorceryCard.TargetType.Creature && target is CreatureCard) ||
+                (sorcery.requiredTargetType == SorceryCard.TargetType.TappedCreature && target is CreatureCard tc && tc.isTapped) ||
+                (sorcery.requiredTargetType == SorceryCard.TargetType.Land && target is LandCard) ||
+                (sorcery.requiredTargetType == SorceryCard.TargetType.Artifact && target is ArtifactCard) ||
+                (sorcery.requiredTargetType == SorceryCard.TargetType.Enchantment && target is EnchantmentCard) ||
+                (sorcery.requiredTargetType == SorceryCard.TargetType.CreatureOrPlayer && target is CreatureCard);
+
+            bool isOnBattlefield = GetOwnerOfCard(target)?.Battlefield.Contains(target) == true;
+
+            bool colorMatches = true;
+            if (!string.IsNullOrEmpty(sorcery.requiredTargetColor))
             {
-                Debug.LogWarning("BeginTargetSelection called for non-targeting sorcery.");
-                return;
+                CardData data = CardDatabase.GetCardData(target.cardName);
+                colorMatches = data != null && data.color.Contains(targetingSorcery.requiredTargetColor);
             }
 
-            // Highlight the selected card
-            if (visual != null)
-                visual.EnableTargetingHighlight(true);
-
-            // Check if any valid targets exist (but do not highlight anything)
-            foreach (var cv in activeCardVisuals)
+            if (correctType && isOnBattlefield && colorMatches && !IsProtectedFromSpell(target))
             {
-                if (cv == null || cv.linkedCard == null)
-                    continue;
-
-                Card target = cv.linkedCard;
-
-                bool correctType =
-                    (sorcery.requiredTargetType == SorceryCard.TargetType.Creature && target is CreatureCard) ||
-                    (sorcery.requiredTargetType == SorceryCard.TargetType.TappedCreature && target is CreatureCard tc && tc.isTapped) ||
-                    (sorcery.requiredTargetType == SorceryCard.TargetType.Land && target is LandCard) ||
-                    (sorcery.requiredTargetType == SorceryCard.TargetType.Artifact && target is ArtifactCard) ||
-                    (sorcery.requiredTargetType == SorceryCard.TargetType.Enchantment && target is EnchantmentCard) ||
-                    (sorcery.requiredTargetType == SorceryCard.TargetType.CreatureOrPlayer && target is CreatureCard);
-
-                bool isOnBattlefield = GetOwnerOfCard(target)?.Battlefield.Contains(target) == true;
-
-                bool colorMatches = true;
-                if (!string.IsNullOrEmpty(sorcery.requiredTargetColor))
-                {
-                    CardData data = CardDatabase.GetCardData(target.cardName);
-                    colorMatches = data != null && data.color.Contains(targetingSorcery.requiredTargetColor);
-                }
-
-                if (correctType && isOnBattlefield && colorMatches && !IsProtectedFromSpell(target))
-                {
-                    // Valid target exists, but no visual feedback is shown
-                }
+                // Valid target exists, but no visual feedback is shown
             }
         }
+    }
 
     private IEnumerator ResolveTargetedSorceryAfterDelay(Card target, Player caster, SorceryCard sorcery, CardVisual visual)
     {
@@ -2728,51 +2715,51 @@ public class GameManager : MonoBehaviour
     }
 
     public void CompleteTargetSelection(CardVisual targetVisual)
+    {
+        Card chosen = targetVisual.linkedCard;
+
+        // Artifact damage ability
+        if (targetingArtifact != null &&
+            targetingArtifact.activatedAbilities.Contains(ActivatedAbility.DealDamageToCreature))
         {
-            Card chosen = targetVisual.linkedCard;
-
-            // Artifact damage ability
-            if (targetingArtifact != null &&
-                targetingArtifact.activatedAbilities.Contains(ActivatedAbility.DealDamageToCreature))
+            if (chosen is CreatureCard targetCreature &&
+                GetOwnerOfCard(targetCreature)?.Battlefield.Contains(targetCreature) == true)
             {
-                if (chosen is CreatureCard targetCreature &&
-                    GetOwnerOfCard(targetCreature)?.Battlefield.Contains(targetCreature) == true)
+                Player controller = targetingPlayer;
+                int remaining = targetingArtifact.manaToPayToActivate;
+
+                remaining -= Player.ManaPool.SpendFromPool(ref controller.ColoredMana.Colorless, remaining);
+                remaining -= Player.ManaPool.SpendFromPool(ref controller.ColoredMana.White, remaining);
+                remaining -= Player.ManaPool.SpendFromPool(ref controller.ColoredMana.Blue, remaining);
+                remaining -= Player.ManaPool.SpendFromPool(ref controller.ColoredMana.Black, remaining);
+                remaining -= Player.ManaPool.SpendFromPool(ref controller.ColoredMana.Red, remaining);
+                remaining -= Player.ManaPool.SpendFromPool(ref controller.ColoredMana.Green, remaining);
+
+                if (remaining > 0)
                 {
-                    Player controller = targetingPlayer;
-                    int remaining = targetingArtifact.manaToPayToActivate;
-
-                    remaining -= Player.ManaPool.SpendFromPool(ref controller.ColoredMana.Colorless, remaining);
-                    remaining -= Player.ManaPool.SpendFromPool(ref controller.ColoredMana.White, remaining);
-                    remaining -= Player.ManaPool.SpendFromPool(ref controller.ColoredMana.Blue, remaining);
-                    remaining -= Player.ManaPool.SpendFromPool(ref controller.ColoredMana.Black, remaining);
-                    remaining -= Player.ManaPool.SpendFromPool(ref controller.ColoredMana.Red, remaining);
-                    remaining -= Player.ManaPool.SpendFromPool(ref controller.ColoredMana.Green, remaining);
-
-                    if (remaining > 0)
-                    {
-                        Debug.LogWarning("Not enough mana to activate artifact.");
-                        CancelTargeting();
-                        return;
-                    }
-
-                    ArtifactCard artifact = targetingArtifact;
-                    targetingArtifact.isTapped = true;
-                    SendToGraveyard(targetingArtifact, controller);
-                    QueueArtifactActivatedAbility(artifact, ActivatedAbility.DealDamageToCreature, controller, targetCreature);
-                    UpdateUI();
-                }
-                else
-                {
-                    Debug.Log("Invalid target. Artifact effect canceled.");
-                    targetingArtifact.isTapped = false;
+                    Debug.LogWarning("Not enough mana to activate artifact.");
+                    CancelTargeting();
+                    return;
                 }
 
-                targetingArtifact = null;
-                targetingPlayer = null;
-                targetingVisual = null;
-                isTargetingMode = false;
-                return;
+                ArtifactCard artifact = targetingArtifact;
+                targetingArtifact.isTapped = true;
+                SendToGraveyard(targetingArtifact, controller);
+                QueueArtifactActivatedAbility(artifact, ActivatedAbility.DealDamageToCreature, controller, targetCreature);
+                UpdateUI();
             }
+            else
+            {
+                Debug.Log("Invalid target. Artifact effect canceled.");
+                targetingArtifact.isTapped = false;
+            }
+
+            targetingArtifact = null;
+            targetingPlayer = null;
+            targetingVisual = null;
+            isTargetingMode = false;
+            return;
+        }
         // Artifact buff ability
         if (targetingArtifact != null &&
             targetingArtifact.activatedAbilities.Contains(ActivatedAbility.BuffTargetCreature))
@@ -2918,157 +2905,93 @@ public class GameManager : MonoBehaviour
         // Creature ETB targeting
         if (targetingCreature != null && targetingAbility != null)
         {
-                Card target = targetVisual.linkedCard;
+            Card target = targetVisual.linkedCard;
 
-                bool correctType =
-                    (targetingAbility.requiredTargetType == SorceryCard.TargetType.Creature && target is CreatureCard creature &&
-                        !(targetingAbility.excludeArtifactCreatures && creature.color.Contains("Artifact"))) ||
-                    (targetingAbility.requiredTargetType == SorceryCard.TargetType.Land && target is LandCard) ||
-                    (targetingAbility.requiredTargetType == SorceryCard.TargetType.Artifact && target is ArtifactCard) ||
-                    (targetingAbility.requiredTargetType == SorceryCard.TargetType.Enchantment && target is EnchantmentCard);
+            bool correctType =
+                (targetingAbility.requiredTargetType == SorceryCard.TargetType.Creature && target is CreatureCard creature &&
+                    !(targetingAbility.excludeArtifactCreatures && creature.color.Contains("Artifact"))) ||
+                (targetingAbility.requiredTargetType == SorceryCard.TargetType.Land && target is LandCard) ||
+                (targetingAbility.requiredTargetType == SorceryCard.TargetType.Artifact && target is ArtifactCard) ||
+                (targetingAbility.requiredTargetType == SorceryCard.TargetType.Enchantment && target is EnchantmentCard);
 
-                bool isOnBattlefield = GetOwnerOfCard(target)?.Battlefield.Contains(target) == true;
+            bool isOnBattlefield = GetOwnerOfCard(target)?.Battlefield.Contains(target) == true;
 
-                if (!correctType || !isOnBattlefield)
-                {
-                    Debug.LogWarning($"Invalid target: {target.cardName} does not match ETB type.");
-                    CancelTargeting();
-                    return;
-                }
-
-                Debug.Log($"ETB target selected: {target.cardName}");
-                targetingAbility.effect?.Invoke(GetOwnerOfCard(targetingCreature), target); // You'll update effect type later if needed
-
-                UpdateUI();
-                CheckDeaths(humanPlayer);
-                CheckDeaths(aiPlayer);
-
-                targetingCreature = null;
-                targetingAbility = null;
-                targetingVisual = null;
-                isTargetingMode = false;
+            if (!correctType || !isOnBattlefield)
+            {
+                Debug.LogWarning($"Invalid target: {target.cardName} does not match ETB type.");
+                CancelTargeting();
                 return;
             }
-            // Sorcery fallback
-            if (targetingSorcery != null)
-            {
-                // Validate type
-                bool correctType =
-                    (targetingSorcery.requiredTargetType == SorceryCard.TargetType.Creature && chosen is CreatureCard creatureT &&
-                        !(targetingSorcery.excludeArtifactCreatures && creatureT.color.Contains("Artifact"))) ||
-                    (targetingSorcery.requiredTargetType == SorceryCard.TargetType.Land && chosen is LandCard) ||
-                    (targetingSorcery.requiredTargetType == SorceryCard.TargetType.Artifact && chosen is ArtifactCard) ||
-                    (targetingSorcery.requiredTargetType == SorceryCard.TargetType.Enchantment && chosen is EnchantmentCard) ||
-                    (targetingSorcery.requiredTargetType == SorceryCard.TargetType.CreatureOrPlayer && chosen is CreatureCard);
 
-                // Validate color
-                bool colorMatches = true;
-                if (!string.IsNullOrEmpty(targetingSorcery.requiredTargetColor))
-                {
-                    CardData data = CardDatabase.GetCardData(chosen.cardName);
-                    colorMatches = data != null && data.color.Contains(targetingSorcery.requiredTargetColor);
-                }
-
-                if (!correctType || !colorMatches)
-                {
-                    Debug.LogWarning($"Invalid target: {chosen.cardName} does not match type or color requirements.");
-                    return;
-                }
-
-                // Pay mana before resolving
-                var cost = GetManaCostBreakdown(targetingSorcery.manaCost, targetingSorcery.color);
-                int tax = GetOpponentSpellTax(targetingPlayer);
-                if (tax > 0)
-                {
-                    if (!cost.ContainsKey("Colorless"))
-                        cost["Colorless"] = 0;
-                    cost["Colorless"] += tax;
-                }
-                if (!targetingPlayer.ColoredMana.CanPay(cost))
-                {
-                    Debug.LogWarning("Not enough mana to cast targeted sorcery.");
-                    CancelTargeting();
-                    return;
-                }
-
-                targetingPlayer.ColoredMana.Pay(cost);
-                if (targetingSorcery.hasXCost)
-                {
-                    targetingSorcery.xValue = targetingPlayer.ColoredMana.Total();
-                    if (targetingSorcery.xValue > 0)
-                        targetingPlayer.ColoredMana.SpendGeneric(targetingSorcery.xValue);
-                }
-                targetingPlayer.Hand.Remove(targetingSorcery);
-                UpdateUI();
-
-                targetingSorcery.chosenTarget = chosen;
-
-                Debug.Log($"Target selected: {chosen.cardName}");
-
-                targetingVisual.transform.SetParent(stackZone, false);
-                targetingVisual.isInStack = true;
-                targetingVisual.transform.localPosition = Vector3.zero;
-                targetingVisual.transform.localRotation = Quaternion.identity;
-                targetingVisual.transform.localScale = Vector3.one;
-                SoundManager.Instance.PlaySound(SoundManager.Instance.cardPlay);
-
-                if (targetingVisual != null)
-                    targetingVisual.EnableTargetingHighlight(false);
-
-                StartCoroutine(ResolveTargetedSorceryAfterDelay(chosen, targetingPlayer, targetingSorcery, targetingVisual));
-
-                targetingSorcery = null;
-                targetingPlayer = null;
-                targetingVisual = null;
-                isTargetingMode = false;
-            }
-        }
-
-    public void CancelTargeting()
-        {
-            foreach (var cv in activeCardVisuals)
-                cv.EnableTargetingHighlight(false); // turn off all
-
-            if (targetingArtifact != null)
-            {
-                targetingArtifact.isTapped = false; // untap if ability was aborted
-                FindCardVisual(targetingArtifact)?.UpdateVisual();
-            }
-
-            targetingArtifact = null;
-            targetingEquipment = null;
-            targetingSorcery = null;
-            targetingAura = null;
-            targetingPlayer = null;
-
-            if (targetingVisual != null)
-                targetingVisual.EnableTargetingHighlight(false); // turn off highlight
-
-            targetingVisual = null;
-            isTargetingMode = false;
-            isStackBusy = false;
+            Debug.Log($"ETB target selected: {target.cardName}");
+            targetingAbility.effect?.Invoke(GetOwnerOfCard(targetingCreature), target); // You'll update effect type later if needed
 
             UpdateUI();
-        }
+            CheckDeaths(humanPlayer);
+            CheckDeaths(aiPlayer);
 
-    public void CompletePlayerTargetSelection(Player targetPlayer)
+            targetingCreature = null;
+            targetingAbility = null;
+            targetingVisual = null;
+            isTargetingMode = false;
+            return;
+        }
+        // Sorcery fallback
+        if (targetingSorcery != null)
         {
-            // Edge case: accidentally triggered for non-sorcery
-            if (targetingSorcery == null)
+            // Validate type
+            bool correctType =
+                (targetingSorcery.requiredTargetType == SorceryCard.TargetType.Creature && chosen is CreatureCard creatureT &&
+                    !(targetingSorcery.excludeArtifactCreatures && creatureT.color.Contains("Artifact"))) ||
+                (targetingSorcery.requiredTargetType == SorceryCard.TargetType.Land && chosen is LandCard) ||
+                (targetingSorcery.requiredTargetType == SorceryCard.TargetType.Artifact && chosen is ArtifactCard) ||
+                (targetingSorcery.requiredTargetType == SorceryCard.TargetType.Enchantment && chosen is EnchantmentCard) ||
+                (targetingSorcery.requiredTargetType == SorceryCard.TargetType.CreatureOrPlayer && chosen is CreatureCard);
+
+            // Validate color
+            bool colorMatches = true;
+            if (!string.IsNullOrEmpty(targetingSorcery.requiredTargetColor))
             {
-                Debug.LogWarning("CompletePlayerTargetSelection called but no sorcery is being resolved.");
-                isTargetingMode = false;
-                targetingPlayer = null;
-                targetingVisual = null;
-                isStackBusy = false;
-                UpdateUI();
+                CardData data = CardDatabase.GetCardData(chosen.cardName);
+                colorMatches = data != null && data.color.Contains(targetingSorcery.requiredTargetColor);
+            }
+
+            if (!correctType || !colorMatches)
+            {
+                Debug.LogWarning($"Invalid target: {chosen.cardName} does not match type or color requirements.");
                 return;
             }
 
-            if (targetingVisual != null)
-                targetingVisual.EnableTargetingHighlight(false);
+            // Pay mana before resolving
+            var cost = GetManaCostBreakdown(targetingSorcery.manaCost, targetingSorcery.color);
+            int tax = GetOpponentSpellTax(targetingPlayer);
+            if (tax > 0)
+            {
+                if (!cost.ContainsKey("Colorless"))
+                    cost["Colorless"] = 0;
+                cost["Colorless"] += tax;
+            }
+            if (!targetingPlayer.ColoredMana.CanPay(cost))
+            {
+                Debug.LogWarning("Not enough mana to cast targeted sorcery.");
+                CancelTargeting();
+                return;
+            }
 
-            // Move visual to stack
+            targetingPlayer.ColoredMana.Pay(cost);
+            if (targetingSorcery.hasXCost)
+            {
+                targetingSorcery.xValue = targetingPlayer.ColoredMana.Total();
+                if (targetingSorcery.xValue > 0)
+                    targetingPlayer.ColoredMana.SpendGeneric(targetingSorcery.xValue);
+            }
+            targetingPlayer.Hand.Remove(targetingSorcery);
+            UpdateUI();
+
+            targetingSorcery.chosenTarget = chosen;
+
+            Debug.Log($"Target selected: {chosen.cardName}");
+
             targetingVisual.transform.SetParent(stackZone, false);
             targetingVisual.isInStack = true;
             targetingVisual.transform.localPosition = Vector3.zero;
@@ -3076,78 +2999,142 @@ public class GameManager : MonoBehaviour
             targetingVisual.transform.localScale = Vector3.one;
             SoundManager.Instance.PlaySound(SoundManager.Instance.cardPlay);
 
-            StartCoroutine(ResolveTargetedSorceryOnPlayerAfterDelay(targetPlayer, targetingPlayer, targetingSorcery, targetingVisual));
+            if (targetingVisual != null)
+                targetingVisual.EnableTargetingHighlight(false);
 
-            if (targetingPlayer == aiPlayer && targetingVisual != null)
-            {
-                activeCardVisuals.Remove(targetingVisual);
-                Destroy(targetingVisual.gameObject);
-            }
+            StartCoroutine(ResolveTargetedSorceryAfterDelay(chosen, targetingPlayer, targetingSorcery, targetingVisual));
 
-            isTargetingMode = false;
             targetingSorcery = null;
             targetingPlayer = null;
             targetingVisual = null;
-
-            UpdateUI();
-            isStackBusy = false;
+            isTargetingMode = false;
         }
+    }
+
+    public void CancelTargeting()
+    {
+        foreach (var cv in activeCardVisuals)
+            cv.EnableTargetingHighlight(false); // turn off all
+
+        if (targetingArtifact != null)
+        {
+            targetingArtifact.isTapped = false; // untap if ability was aborted
+            FindCardVisual(targetingArtifact)?.UpdateVisual();
+        }
+
+        targetingArtifact = null;
+        targetingEquipment = null;
+        targetingSorcery = null;
+        targetingAura = null;
+        targetingPlayer = null;
+
+        if (targetingVisual != null)
+            targetingVisual.EnableTargetingHighlight(false); // turn off highlight
+
+        targetingVisual = null;
+        isTargetingMode = false;
+        isStackBusy = false;
+
+        UpdateUI();
+    }
+
+    public void CompletePlayerTargetSelection(Player targetPlayer)
+    {
+        // Edge case: accidentally triggered for non-sorcery
+        if (targetingSorcery == null)
+        {
+            Debug.LogWarning("CompletePlayerTargetSelection called but no sorcery is being resolved.");
+            isTargetingMode = false;
+            targetingPlayer = null;
+            targetingVisual = null;
+            isStackBusy = false;
+            UpdateUI();
+            return;
+        }
+
+        if (targetingVisual != null)
+            targetingVisual.EnableTargetingHighlight(false);
+
+        // Move visual to stack
+        targetingVisual.transform.SetParent(stackZone, false);
+        targetingVisual.isInStack = true;
+        targetingVisual.transform.localPosition = Vector3.zero;
+        targetingVisual.transform.localRotation = Quaternion.identity;
+        targetingVisual.transform.localScale = Vector3.one;
+        SoundManager.Instance.PlaySound(SoundManager.Instance.cardPlay);
+
+        StartCoroutine(ResolveTargetedSorceryOnPlayerAfterDelay(targetPlayer, targetingPlayer, targetingSorcery, targetingVisual));
+
+        if (targetingPlayer == aiPlayer && targetingVisual != null)
+        {
+            activeCardVisuals.Remove(targetingVisual);
+            Destroy(targetingVisual.gameObject);
+        }
+
+        isTargetingMode = false;
+        targetingSorcery = null;
+        targetingPlayer = null;
+        targetingVisual = null;
+
+        UpdateUI();
+        isStackBusy = false;
+    }
 
     private bool IsProtectedFromSpell(Card card)
+    {
+        if (card is CreatureCard creature && targetingSorcery != null)
         {
-            if (card is CreatureCard creature && targetingSorcery != null)
-            {
-                KeywordAbility protection = ProtectionUtils.GetProtectionKeyword(targetingSorcery.PrimaryColor);
-                return creature.keywordAbilities.Contains(protection);
-            }
-
-            return false;
+            KeywordAbility protection = ProtectionUtils.GetProtectionKeyword(targetingSorcery.PrimaryColor);
+            return creature.keywordAbilities.Contains(protection);
         }
+
+        return false;
+    }
 
     private IEnumerator ResolveTargetedSorceryOnPlayerAfterDelay(Player targetPlayer, Player caster, SorceryCard sorcery, CardVisual visual)
+    {
+        yield return new WaitForSeconds(2f);
+
+        sorcery.ResolveEffectOnPlayer(caster, targetPlayer);
+        SendToGraveyard(sorcery, caster, fromStack: true);
+
+        if (caster == aiPlayer && visual != null)
         {
-            yield return new WaitForSeconds(2f);
-
-            sorcery.ResolveEffectOnPlayer(caster, targetPlayer);
-            SendToGraveyard(sorcery, caster, fromStack: true);
-
-            if (caster == aiPlayer && visual != null)
-            {
-                activeCardVisuals.Remove(visual);
-                Destroy(visual.gameObject);
-            }
-
-            UpdateUI();
-            isStackBusy = false;
+            activeCardVisuals.Remove(visual);
+            Destroy(visual.gameObject);
         }
-    
+
+        UpdateUI();
+        isStackBusy = false;
+    }
+
     public Dictionary<string, int> GetManaCostBreakdown(int totalCost, List<string> color)
+    {
+        Dictionary<string, int> breakdown = new Dictionary<string, int>();
+
+        // Treat empty color or "Artifact" as fully colorless
+        if (color == null || color.Count == 0 || (color.Count == 1 && color[0] == "Artifact"))
         {
-            Dictionary<string, int> breakdown = new Dictionary<string, int>();
-
-            // Treat empty color or "Artifact" as fully colorless
-            if (color == null || color.Count == 0 || (color.Count == 1 && color[0] == "Artifact"))
-            {
-                breakdown["Colorless"] = totalCost;
-            }
-            else
-            {
-                foreach (string c in color)
-                {
-                    if (c == "Artifact") continue; // Don't treat Artifact as colored mana
-                    if (!breakdown.ContainsKey(c))
-                        breakdown[c] = 0;
-                    breakdown[c]++;
-                }
-
-                int coloredCount = breakdown.Values.Sum();
-                int generic = totalCost - coloredCount;
-                if (generic > 0)
-                    breakdown["Colorless"] = generic;
-            }
-
-            return breakdown;
+            breakdown["Colorless"] = totalCost;
         }
+        else
+        {
+            foreach (string c in color)
+            {
+                if (c == "Artifact") continue; // Don't treat Artifact as colored mana
+                if (!breakdown.ContainsKey(c))
+                    breakdown[c] = 0;
+                breakdown[c]++;
+            }
+
+            int coloredCount = breakdown.Values.Sum();
+            int generic = totalCost - coloredCount;
+            if (generic > 0)
+                breakdown["Colorless"] = generic;
+        }
+
+        return breakdown;
+    }
 
 
     public void BeginTargetingWithArtifactDamage(ArtifactCard artifact, Player player, CardVisual visual)
@@ -3207,1136 +3194,829 @@ public class GameManager : MonoBehaviour
     }
 
     public IEnumerator ResolveArtifactDamageAfterDelay(CardVisual targetVisual, Card targetCard)
+    {
+        yield return new WaitForSeconds(0.4f);
+
+        if (targetCard is CreatureCard creature &&
+            GetOwnerOfCard(creature)?.Battlefield.Contains(creature) == true &&
+            targetingArtifact != null)
         {
-            yield return new WaitForSeconds(0.4f);
-
-            if (targetCard is CreatureCard creature &&
-                GetOwnerOfCard(creature)?.Battlefield.Contains(creature) == true &&
-                targetingArtifact != null)
+            creature.TakeDamage(targetingArtifact.damageToCreature);
+            Card asCard = targetingArtifact;
+            if (asCard is CreatureCard srcCreature &&
+                srcCreature.keywordAbilities.Contains(KeywordAbility.Deathtouch) &&
+                targetingArtifact.damageToCreature > 0)
             {
-                creature.TakeDamage(targetingArtifact.damageToCreature);
-                Card asCard = targetingArtifact;
-                if (asCard is CreatureCard srcCreature &&
-                    srcCreature.keywordAbilities.Contains(KeywordAbility.Deathtouch) &&
-                    targetingArtifact.damageToCreature > 0)
-                {
-                    creature.Kill();
-                }
-                Debug.Log($"{targetingArtifact.cardName} dealt {targetingArtifact.damageToCreature} damage to {creature.cardName}");
-                targetingArtifact.isTapped = true;
-                SendToGraveyard(targetingArtifact, targetingPlayer);
-                CheckDeaths(humanPlayer);
-                CheckDeaths(aiPlayer);
-                UpdateUI();
+                creature.Kill();
             }
-            else
-            {
-                Debug.Log("Invalid or missing target — damage not applied.");
-                targetingArtifact.isTapped = false; // Optionally untap
-            }
-
-            targetingArtifact = null;
-            targetingPlayer = null;
-            targetingVisual = null;
-            isTargetingMode = false;
+            Debug.Log($"{targetingArtifact.cardName} dealt {targetingArtifact.damageToCreature} damage to {creature.cardName}");
+            targetingArtifact.isTapped = true;
+            SendToGraveyard(targetingArtifact, targetingPlayer);
+            CheckDeaths(humanPlayer);
+            CheckDeaths(aiPlayer);
+            UpdateUI();
         }
+        else
+        {
+            Debug.Log("Invalid or missing target — damage not applied.");
+            targetingArtifact.isTapped = false; // Optionally untap
+        }
+
+        targetingArtifact = null;
+        targetingPlayer = null;
+        targetingVisual = null;
+        isTargetingMode = false;
+    }
 
     public void BeginTargetSelectionForCreature(Card creature, Player owner, CardAbility ability)
+    {
+        targetingCreature = creature;
+        targetingAbility = ability;
+        isTargetingMode = true;
+
+        bool foundValidTarget = false;
+
+        foreach (var cv in activeCardVisuals)
         {
-            targetingCreature = creature;
-            targetingAbility = ability;
-            isTargetingMode = true;
+            if (cv == null || cv.linkedCard == null)
+                continue;
 
-            bool foundValidTarget = false;
+            Card target = cv.linkedCard;
 
-            foreach (var cv in activeCardVisuals)
+            bool correctType =
+                (ability.requiredTargetType == SorceryCard.TargetType.Creature && target is CreatureCard) ||
+                (ability.requiredTargetType == SorceryCard.TargetType.Artifact && target is ArtifactCard) ||
+                (ability.requiredTargetType == SorceryCard.TargetType.Enchantment && target is EnchantmentCard) ||
+                (ability.requiredTargetType == SorceryCard.TargetType.Land && target is LandCard);
+
+            bool isOnBattlefield = GetOwnerOfCard(target)?.Battlefield.Contains(target) == true;
+
+            if (correctType && isOnBattlefield)
             {
-                if (cv == null || cv.linkedCard == null)
-                    continue;
+                foundValidTarget = true;
+                break;
+            }
+        }
 
-                Card target = cv.linkedCard;
+        if (!foundValidTarget)
+        {
+            Debug.Log("No valid targets for creature ETB — skipping ability.");
+            targetingCreature = null;
+            targetingAbility = null;
+            isTargetingMode = false;
+        }
+        else
+        {
+            Debug.Log("ETB ability requires target — enter targeting mode.");
+        }
+    }
 
-                bool correctType =
-                    (ability.requiredTargetType == SorceryCard.TargetType.Creature && target is CreatureCard) ||
-                    (ability.requiredTargetType == SorceryCard.TargetType.Artifact && target is ArtifactCard) ||
-                    (ability.requiredTargetType == SorceryCard.TargetType.Enchantment && target is EnchantmentCard) ||
-                    (ability.requiredTargetType == SorceryCard.TargetType.Land && target is LandCard);
+    public bool HasValidTargetForAbility(CardAbility ability)
+    {
+        List<Card> battlefieldCards = new List<Card>();
+        battlefieldCards.AddRange(humanPlayer.Battlefield);
+        battlefieldCards.AddRange(aiPlayer.Battlefield);
 
-                bool isOnBattlefield = GetOwnerOfCard(target)?.Battlefield.Contains(target) == true;
+        foreach (Card target in battlefieldCards)
+        {
+            bool correctType =
+                (ability.requiredTargetType == SorceryCard.TargetType.Creature && target is CreatureCard) ||
+                (ability.requiredTargetType == SorceryCard.TargetType.Artifact && target is ArtifactCard) ||
+                (ability.requiredTargetType == SorceryCard.TargetType.Enchantment && target is EnchantmentCard) ||
+                (ability.requiredTargetType == SorceryCard.TargetType.Land && target is LandCard);
 
-                if (correctType && isOnBattlefield)
+            if (correctType)
+                return true;
+        }
+
+        return false;
+    }
+
+    public void BeginOptionalTargetSelectionAfterEntry(Card creature, Player owner, CardAbility ability)
+    {
+        targetingCreatureOptional = creature;
+        optionalAbility = ability;
+        optionalTargetPlayer = null;
+        pendingStackEffects++;
+        isTargetingMode = true;
+        targetingVisual = FindCardVisual(creature); // Optional, for visual link
+
+        Debug.Log($"Optional ETB targeting started for {creature.cardName}. Click a valid target if you want to use the ability.");
+    }
+
+    public void CancelOptionalTargeting()
+    {
+        if (targetingCreatureOptional != null)
+        {
+            Debug.Log("Optional targeting cancelled.");
+            targetingCreatureOptional = null;
+            optionalAbility = null;
+            optionalTargetPlayer = null;
+            pendingStackEffects = Mathf.Max(0, pendingStackEffects - 1);
+            isTargetingMode = false;
+            targetingVisual = null;
+        }
+    }
+
+    public void ResolveOptionalTargeting(Card target)
+    {
+        if (targetingCreatureOptional == null || optionalAbility == null)
+            return;
+
+        var ability = optionalAbility;
+        var source = targetingCreatureOptional;
+        Player owner = GetOwnerOfCard(source);
+
+        targetingCreatureOptional = null;
+        optionalAbility = null;
+        isTargetingMode = false;
+        targetingVisual = null;
+
+        QueueTriggeredAbility(ability, owner, source, target);
+        pendingStackEffects = Mathf.Max(0, pendingStackEffects - 1);
+    }
+
+    public void ResolveOptionalPlayerTargeting(Player target)
+    {
+        if (targetingCreatureOptional == null || optionalAbility == null)
+            return;
+
+        optionalTargetPlayer = target;
+        var ability = optionalAbility;
+        var source = targetingCreatureOptional;
+        Player owner = GetOwnerOfCard(source);
+
+        targetingCreatureOptional = null;
+        optionalAbility = null;
+        isTargetingMode = false;
+        targetingVisual = null;
+
+        QueueTriggeredAbility(ability, owner, source, null);
+        pendingStackEffects = Mathf.Max(0, pendingStackEffects - 1);
+    }
+
+    public void QueueTriggeredAbility(CardAbility ability, Player owner, Card source, Card target = null, Card deadCreature = null)
+    {
+        triggerQueue.Enqueue(new TriggeredAbilityContext(ability, owner, source, target, deadCreature));
+        pendingStackEffects++;
+        if (!processingTriggerQueue)
+            StartCoroutine(ProcessTriggerQueue());
+    }
+
+    private IEnumerator ProcessTriggerQueue()
+    {
+        processingTriggerQueue = true;
+        while (triggerQueue.Count > 0)
+        {
+            var ctx = triggerQueue.Dequeue();
+            yield return StartCoroutine(ResolveTriggeredAbilityOnStack(ctx.ability, ctx.owner, ctx.source, ctx.target, ctx.deadCreature));
+        }
+        processingTriggerQueue = false;
+    }
+
+    public (int playerDamage, int aiDamage) ResolveCombatForAttacker(CreatureCard attacker)
+    {
+        int playerDamage = 0;
+        int aiDamage = 0;
+
+        // Clamp negative power to zero when dealing damage and respect damage prevention
+        int attackerDamage = attacker.keywordAbilities.Contains(KeywordAbility.CantDealCombatDamage)
+            ? 0
+            : Mathf.Max(attacker.power, 0);
+
+        var blockers = attacker.blockedByThisBlocker;
+
+        if (blockers != null && blockers.Count > 0)
+        {
+            int remainingDamage = attackerDamage;
+            int totalDamageFromBlockers = 0;
+
+            bool attackerHasTrample = attacker.keywordAbilities.Contains(KeywordAbility.Trample);
+            for (int i = 0; i < blockers.Count; i++)
+            {
+                var blocker = blockers[i];
+                bool attackerProtected = blocker.color.Any(c => attacker.keywordAbilities.Contains(ProtectionUtils.GetProtectionKeyword(c)));
+                bool blockerProtected = attacker.color.Any(c => blocker.keywordAbilities.Contains(ProtectionUtils.GetProtectionKeyword(c)));
+
+                int damageToBlocker = 0;
+                if (!blockerProtected)
                 {
-                    foundValidTarget = true;
-                    break;
+                    bool isLastBlocker = i == blockers.Count - 1;
+                    if (!attackerHasTrample && isLastBlocker)
+                        damageToBlocker = remainingDamage;
+                    else
+                        damageToBlocker = Mathf.Min(remainingDamage, blocker.toughness);
+
+                    blocker.TakeDamage(damageToBlocker);
+                    if (attacker.keywordAbilities.Contains(KeywordAbility.Deathtouch) && damageToBlocker > 0)
+                        blocker.Kill();
+                    remainingDamage -= damageToBlocker;
+                }
+
+                int damageFromBlocker = (attackerProtected || blocker.keywordAbilities.Contains(KeywordAbility.CantDealCombatDamage))
+                    ? 0
+                    : Mathf.Max(blocker.power, 0);
+                if (!attackerProtected)
+                {
+                    totalDamageFromBlockers += damageFromBlocker;
+                    if (blocker.keywordAbilities.Contains(KeywordAbility.Deathtouch) && damageFromBlocker > 0)
+                        attacker.Kill();
+                }
+
+                if (damageToBlocker > 0 || damageFromBlocker > 0)
+                    SoundManager.Instance.PlaySound(SoundManager.Instance.impact);
+
+                if (attacker.keywordAbilities.Contains(KeywordAbility.Lifelink) && damageToBlocker > 0)
+                {
+                    Player owner = GetOwnerOfCard(attacker);
+                    TryGainLife(owner, damageToBlocker);
+                }
+
+                if (blocker.keywordAbilities.Contains(KeywordAbility.Lifelink) && damageFromBlocker > 0)
+                {
+                    Player blockerOwner = GetOwnerOfCard(blocker);
+                    TryGainLife(blockerOwner, damageFromBlocker);
                 }
             }
 
-            if (!foundValidTarget)
+            attacker.TakeDamage(totalDamageFromBlockers);
+
+            if (attacker.keywordAbilities.Contains(KeywordAbility.Trample) && remainingDamage > 0)
             {
-                Debug.Log("No valid targets for creature ETB — skipping ability.");
-                targetingCreature = null;
-                targetingAbility = null;
-                isTargetingMode = false;
+                if (humanPlayer.Battlefield.Contains(attacker))
+                {
+                    aiPlayer.Life -= remainingDamage;
+                    aiDamage += remainingDamage;
+                    NotifyCombatDamageToPlayer(attacker, aiPlayer);
+                }
+                else
+                {
+                    humanPlayer.Life -= remainingDamage;
+                    playerDamage += remainingDamage;
+                    NotifyCombatDamageToPlayer(attacker, humanPlayer);
+                }
+
+                if (attacker.keywordAbilities.Contains(KeywordAbility.Lifelink))
+                {
+                    TryGainLife(GetOwnerOfCard(attacker), remainingDamage);
+                }
+            }
+        }
+        else
+        {
+            if (humanPlayer.Battlefield.Contains(attacker))
+            {
+                aiPlayer.Life -= attackerDamage;
+                aiDamage += attackerDamage;
+                NotifyCombatDamageToPlayer(attacker, aiPlayer);
+
+                if (attacker.keywordAbilities.Contains(KeywordAbility.Lifelink))
+                {
+                    Player owner = humanPlayer.Battlefield.Contains(attacker) ? humanPlayer : aiPlayer;
+                    TryGainLife(owner, attackerDamage);
+                }
             }
             else
             {
-                Debug.Log("ETB ability requires target — enter targeting mode.");
-            }
-        }
+                humanPlayer.Life -= attackerDamage;
+                playerDamage += attackerDamage;
+                NotifyCombatDamageToPlayer(attacker, humanPlayer);
 
-        public bool HasValidTargetForAbility(CardAbility ability)
-            {
-                List<Card> battlefieldCards = new List<Card>();
-                battlefieldCards.AddRange(humanPlayer.Battlefield);
-                battlefieldCards.AddRange(aiPlayer.Battlefield);
-
-                foreach (Card target in battlefieldCards)
+                if (attacker.keywordAbilities.Contains(KeywordAbility.Lifelink))
                 {
-                    bool correctType =
-                        (ability.requiredTargetType == SorceryCard.TargetType.Creature && target is CreatureCard) ||
-                        (ability.requiredTargetType == SorceryCard.TargetType.Artifact && target is ArtifactCard) ||
-                        (ability.requiredTargetType == SorceryCard.TargetType.Enchantment && target is EnchantmentCard) ||
-                        (ability.requiredTargetType == SorceryCard.TargetType.Land && target is LandCard);
-
-                    if (correctType)
-                        return true;
-                }
-
-                return false;
-            }
-
-        public void BeginOptionalTargetSelectionAfterEntry(Card creature, Player owner, CardAbility ability)
-            {
-                targetingCreatureOptional = creature;
-                optionalAbility = ability;
-                optionalTargetPlayer = null;
-                pendingStackEffects++;
-                isTargetingMode = true;
-                targetingVisual = FindCardVisual(creature); // Optional, for visual link
-
-                Debug.Log($"Optional ETB targeting started for {creature.cardName}. Click a valid target if you want to use the ability.");
-            }
-
-        public void CancelOptionalTargeting()
-            {
-                if (targetingCreatureOptional != null)
-                {
-                    Debug.Log("Optional targeting cancelled.");
-                    targetingCreatureOptional = null;
-                    optionalAbility = null;
-                    optionalTargetPlayer = null;
-                    pendingStackEffects = Mathf.Max(0, pendingStackEffects - 1);
-                    isTargetingMode = false;
-                    targetingVisual = null;
-                }
-            }
-
-        public void ResolveOptionalTargeting(Card target)
-        {
-            if (targetingCreatureOptional == null || optionalAbility == null)
-                return;
-
-            var ability = optionalAbility;
-            var source = targetingCreatureOptional;
-            Player owner = GetOwnerOfCard(source);
-
-            targetingCreatureOptional = null;
-            optionalAbility = null;
-            isTargetingMode = false;
-            targetingVisual = null;
-
-            QueueTriggeredAbility(ability, owner, source, target);
-            pendingStackEffects = Mathf.Max(0, pendingStackEffects - 1);
-        }
-
-        public void ResolveOptionalPlayerTargeting(Player target)
-        {
-            if (targetingCreatureOptional == null || optionalAbility == null)
-                return;
-
-            optionalTargetPlayer = target;
-            var ability = optionalAbility;
-            var source = targetingCreatureOptional;
-            Player owner = GetOwnerOfCard(source);
-
-            targetingCreatureOptional = null;
-            optionalAbility = null;
-            isTargetingMode = false;
-            targetingVisual = null;
-
-            QueueTriggeredAbility(ability, owner, source, null);
-            pendingStackEffects = Mathf.Max(0, pendingStackEffects - 1);
-        }
-
-        public void QueueTriggeredAbility(CardAbility ability, Player owner, Card source, Card target = null, Card deadCreature = null)
-        {
-            triggerQueue.Enqueue(new TriggeredAbilityContext(ability, owner, source, target, deadCreature));
-            pendingStackEffects++;
-            if (!processingTriggerQueue)
-                StartCoroutine(ProcessTriggerQueue());
-        }
-
-        private IEnumerator ProcessTriggerQueue()
-        {
-            processingTriggerQueue = true;
-            while (triggerQueue.Count > 0)
-            {
-                var ctx = triggerQueue.Dequeue();
-                yield return StartCoroutine(ResolveTriggeredAbilityOnStack(ctx.ability, ctx.owner, ctx.source, ctx.target, ctx.deadCreature));
-            }
-            processingTriggerQueue = false;
-        }
-
-        public void DeferLifeDeltaFade(bool defer)
-        {
-            lifeDeltaFadeDeferred = defer;
-            if (defer)
-            {
-                if (playerDeltaRoutine != null)
-                {
-                    StopCoroutine(playerDeltaRoutine);
-                    playerDeltaRoutine = null;
-                }
-                if (enemyDeltaRoutine != null)
-                {
-                    StopCoroutine(enemyDeltaRoutine);
-                    enemyDeltaRoutine = null;
+                    TryGainLife(aiPlayer, attackerDamage);
                 }
             }
         }
 
-        private void UpdateLifeDelta(GameObject target, int change)
-            {
-                bool isPlayer = target == playerLifeContainer;
-                bool isEnemy = target == enemyLifeContainer;
-                if (!isPlayer && !isEnemy)
-                    return;
+        return (playerDamage, aiDamage);
+    }
 
-                TMP_Text txt = isPlayer ? playerLifeDeltaText : enemyLifeDeltaText;
-                int total = isPlayer ? playerLifeDelta : enemyLifeDelta;
-                total += change;
-
-                if (txt == null)
-                {
-                    if (floatingDamagePrefab == null)
-                    {
-                        Debug.LogError("Missing floatingDamagePrefab!");
-                        return;
-                    }
-
-                    GameObject obj = Instantiate(floatingDamagePrefab);
-                    obj.transform.SetParent(GameObject.Find("Canvas").transform, false);
-
-                    RectTransform canvasRect = GameObject.Find("Canvas").GetComponent<RectTransform>();
-                    RectTransform targetRect = target.GetComponent<RectTransform>();
-                    RectTransform rt = obj.GetComponent<RectTransform>();
-
-                    Vector3 screenPos = RectTransformUtility.WorldToScreenPoint(Camera.main, targetRect.position);
-                    RectTransformUtility.ScreenPointToLocalPointInRectangle(canvasRect, screenPos, Camera.main, out Vector2 localPoint);
-                    rt.anchoredPosition = localPoint;
-
-                    rt.localScale = Vector3.one;
-                    rt.sizeDelta = new Vector2(100, 40);
-
-                    txt = obj.GetComponent<TMP_Text>();
-
-                    if (isPlayer)
-                        playerLifeDeltaText = txt;
-                    else
-                        enemyLifeDeltaText = txt;
-                }
-
-                txt.fontSize = 48;
-                txt.enableAutoSizing = false;
-                txt.text = (total > 0 ? "+" : "") + total;
-                txt.color = total > 0 ? Color.green : Color.red;
-
-                if (isPlayer)
-                {
-                    playerLifeDelta = total;
-                    if (!lifeDeltaFadeDeferred)
-                    {
-                        if (playerDeltaRoutine != null)
-                            StopCoroutine(playerDeltaRoutine);
-                        playerDeltaRoutine = StartCoroutine(DelayFinalize(target));
-                    }
-                }
-                else
-                {
-                    enemyLifeDelta = total;
-                    if (!lifeDeltaFadeDeferred)
-                    {
-                        if (enemyDeltaRoutine != null)
-                            StopCoroutine(enemyDeltaRoutine);
-                        enemyDeltaRoutine = StartCoroutine(DelayFinalize(target));
-                    }
-                }
-            }
-
-        public void ResetLifeDeltas()
-            {
-                if (playerLifeDeltaText != null)
-                {
-                    Destroy(playerLifeDeltaText.gameObject);
-                    playerLifeDeltaText = null;
-                }
-                if (enemyLifeDeltaText != null)
-                {
-                    Destroy(enemyLifeDeltaText.gameObject);
-                    enemyLifeDeltaText = null;
-                }
-                playerLifeDelta = 0;
-                enemyLifeDelta = 0;
-            }
-
-        public void FinalizeLifeDeltas()
-            {
-                lifeDeltaFadeDeferred = false;
-                if (playerLifeDeltaText != null)
-                    StartCoroutine(FadeAndFloatText(playerLifeDeltaText.gameObject, true));
-                if (enemyLifeDeltaText != null)
-                    StartCoroutine(FadeAndFloatText(enemyLifeDeltaText.gameObject, false));
-
-                playerLifeDeltaText = null;
-                enemyLifeDeltaText = null;
-                if (playerDeltaRoutine != null)
-                {
-                    StopCoroutine(playerDeltaRoutine);
-                    playerDeltaRoutine = null;
-                }
-                if (enemyDeltaRoutine != null)
-                {
-                    StopCoroutine(enemyDeltaRoutine);
-                    enemyDeltaRoutine = null;
-                }
-                playerLifeDelta = 0;
-                enemyLifeDelta = 0;
-            }
-
-        private IEnumerator DelayFinalize(GameObject target)
-            {
-                yield return new WaitForSeconds(1.5f);
-                if (target == playerLifeContainer && playerLifeDeltaText != null)
-                {
-                    StartCoroutine(FadeAndFloatText(playerLifeDeltaText.gameObject, true));
-                    playerLifeDeltaText = null;
-                    playerLifeDelta = 0;
-                    playerDeltaRoutine = null;
-                }
-                else if (target == enemyLifeContainer && enemyLifeDeltaText != null)
-                {
-                    StartCoroutine(FadeAndFloatText(enemyLifeDeltaText.gameObject, false));
-                    enemyLifeDeltaText = null;
-                    enemyLifeDelta = 0;
-                    enemyDeltaRoutine = null;
-                }
-            }
-        
-        public void ShowFloatingDamage(int amount, GameObject target)
-            {
-                if (target == playerLifeContainer || target == enemyLifeContainer)
-                {
-                    SoundManager.Instance.PlaySound(SoundManager.Instance.dealDamage);
-                    UpdateLifeDelta(target, -amount);
-                    return;
-                }
-
-                if (floatingDamagePrefab == null)
-                {
-                    Debug.LogError("Missing floatingDamagePrefab!");
-                    return;
-                }
-
-                GameObject obj = Instantiate(floatingDamagePrefab);
-                obj.transform.SetParent(GameObject.Find("Canvas").transform, false);
-
-                RectTransform canvasRect = GameObject.Find("Canvas").GetComponent<RectTransform>();
-                RectTransform targetRect = target.GetComponent<RectTransform>();
-                RectTransform rt = obj.GetComponent<RectTransform>();
-
-                Vector3 screenPos = RectTransformUtility.WorldToScreenPoint(Camera.main, targetRect.position);
-                RectTransformUtility.ScreenPointToLocalPointInRectangle(canvasRect, screenPos, Camera.main, out Vector2 localPoint);
-                rt.anchoredPosition = localPoint;
-
-                rt.localScale = Vector3.one;
-                rt.sizeDelta = new Vector2(100, 40);
-
-                TMP_Text text = obj.GetComponent<TMP_Text>();
-                text.fontSize = 48;
-                text.enableAutoSizing = false;
-                text.text = "-" + amount;
-                text.color = Color.red;
-
-                SoundManager.Instance.PlaySound(SoundManager.Instance.dealDamage);
-
-                StartCoroutine(FadeAndFloatText(obj, target == playerLifeContainer));
-            }
-        
-        public void ShowFloatingHeal(int amount, GameObject target)
+    public IEnumerator ResolveCombatWithAnimations()
+    {
+        VisualEffectManager.Instance.ResetLifeDeltas();
+        foreach (var attacker in new List<CreatureCard>(currentAttackers))
         {
-            Debug.Log($"ShowFloatingHeal called: amount={amount}, target={target.name}");
-
-                if (target == playerLifeContainer || target == enemyLifeContainer)
-                {
-                    SoundManager.Instance.PlaySound(SoundManager.Instance.gain_life);
-                    UpdateLifeDelta(target, amount);
-                    return;
-                }
-
-                if (floatingDamagePrefab == null)
-                {
-                    Debug.LogError("Missing floatingDamagePrefab!");
-                    return;
-                }
-
-                GameObject obj = Instantiate(floatingDamagePrefab);
-                obj.transform.SetParent(GameObject.Find("Canvas").transform, false);
-
-                RectTransform canvasRect = GameObject.Find("Canvas").GetComponent<RectTransform>();
-                RectTransform targetRect = target.GetComponent<RectTransform>();
-                RectTransform rt = obj.GetComponent<RectTransform>();
-
-                Vector3 screenPos = RectTransformUtility.WorldToScreenPoint(Camera.main, targetRect.position);
-                RectTransformUtility.ScreenPointToLocalPointInRectangle(canvasRect, screenPos, Camera.main, out Vector2 localPoint);
-                rt.anchoredPosition = localPoint;
-
-                rt.localScale = Vector3.one;
-                rt.sizeDelta = new Vector2(100, 40);
-
-                TMP_Text text = obj.GetComponent<TMP_Text>();
-                text.fontSize = 48;
-                text.enableAutoSizing = false;
-                text.text = "+" + amount;
-                text.color = Color.green;
-
-                SoundManager.Instance.PlaySound(SoundManager.Instance.gain_life); // use appropriate sound
-
-                StartCoroutine(FadeAndFloatText(obj, target == playerLifeContainer));
-            }
-
-        private void ShowFavouritePopup()
-        {
-            if (favouritePopupPrefab == null || playerLifeContainer == null)
-                return;
-
-            GameObject obj = Instantiate(favouritePopupPrefab);
-            obj.transform.SetParent(GameObject.Find("Canvas").transform, false);
-
-            RectTransform canvasRect = GameObject.Find("Canvas").GetComponent<RectTransform>();
-            RectTransform targetRect = playerLifeContainer.GetComponent<RectTransform>();
-            RectTransform rt = obj.GetComponent<RectTransform>();
-
-            Vector3 screenPos = RectTransformUtility.WorldToScreenPoint(Camera.main, targetRect.position);
-            RectTransformUtility.ScreenPointToLocalPointInRectangle(canvasRect, screenPos, Camera.main, out Vector2 localPoint);
-            rt.anchoredPosition = localPoint;
-
-            obj.AddComponent<FavouritePopupVFX>();
-        }
-        
-        private IEnumerator FadeAndFloatText(GameObject obj, bool floatUp)
+            CardVisual attackerVisual = FindCardVisual(attacker);
+            if (attackerVisual == null)
             {
-                RectTransform rt = obj.GetComponent<RectTransform>();
-                TMP_Text text = obj.GetComponent<TMP_Text>();
-                Vector3 startPos = rt.localPosition;
-                float t = 0f;
-                float direction = floatUp ? 1f : -1f;
-
-                Color baseColor = text.color;
-
-                while (t < 1.25f)
-                {
-                    t += Time.deltaTime;
-                    rt.localPosition = startPos + new Vector3(0, t * 20f * direction, 0);
-                    text.color = new Color(baseColor.r, baseColor.g, baseColor.b, 1 - t * 0.8f);
-                    yield return null;
-                }
-
-                Destroy(obj);
-                yield break;
+                continue;
             }
+            Vector3 startPos = attackerVisual.transform.position;
 
-        private IEnumerator MoveCard(Transform tf, Vector3 start, Vector3 end, float duration)
+            if (attacker.blockedByThisBlocker != null && attacker.blockedByThisBlocker.Count > 0)
             {
-                Canvas cardCanvas = tf.GetComponentInChildren<Canvas>();
-                int originalOrder = 0;
-                bool originalOverride = false;
-                if (cardCanvas != null)
+                var blockerVisual = FindCardVisual(attacker.blockedByThisBlocker[0]);
+                if (blockerVisual != null)
                 {
-                    originalOrder = cardCanvas.sortingOrder;
-                    originalOverride = cardCanvas.overrideSorting;
-                    cardCanvas.overrideSorting = true;
-                    cardCanvas.sortingOrder = 100;
-                }
-
-                float t = 0f;
-                while (t < duration)
-                {
-                    if (tf == null) yield break;
-                    t += Time.deltaTime;
-                    tf.position = Vector3.Lerp(start, end, t / duration);
-                    yield return null;
-                }
-
-                if (tf != null)
-                    tf.position = end;
-
-                if (cardCanvas != null)
-                {
-                    cardCanvas.sortingOrder = originalOrder;
-                    cardCanvas.overrideSorting = originalOverride;
+                    yield return StartCoroutine(VisualEffectManager.Instance.MoveCard(attackerVisual.transform, startPos, blockerVisual.transform.position, 0.15f));
                 }
             }
-
-        public (int playerDamage, int aiDamage) ResolveCombatForAttacker(CreatureCard attacker)
+            else
             {
-                int playerDamage = 0;
-                int aiDamage = 0;
-
-                // Clamp negative power to zero when dealing damage and respect damage prevention
-                int attackerDamage = attacker.keywordAbilities.Contains(KeywordAbility.CantDealCombatDamage)
-                    ? 0
-                    : Mathf.Max(attacker.power, 0);
-
-                var blockers = attacker.blockedByThisBlocker;
-
-                if (blockers != null && blockers.Count > 0)
-                {
-                    int remainingDamage = attackerDamage;
-                    int totalDamageFromBlockers = 0;
-
-                    bool attackerHasTrample = attacker.keywordAbilities.Contains(KeywordAbility.Trample);
-                    for (int i = 0; i < blockers.Count; i++)
-                    {
-                        var blocker = blockers[i];
-                        bool attackerProtected = blocker.color.Any(c => attacker.keywordAbilities.Contains(ProtectionUtils.GetProtectionKeyword(c)));
-                        bool blockerProtected = attacker.color.Any(c => blocker.keywordAbilities.Contains(ProtectionUtils.GetProtectionKeyword(c)));
-
-                        int damageToBlocker = 0;
-                        if (!blockerProtected)
-                        {
-                            bool isLastBlocker = i == blockers.Count - 1;
-                            if (!attackerHasTrample && isLastBlocker)
-                                damageToBlocker = remainingDamage;
-                            else
-                                damageToBlocker = Mathf.Min(remainingDamage, blocker.toughness);
-
-                            blocker.TakeDamage(damageToBlocker);
-                            if (attacker.keywordAbilities.Contains(KeywordAbility.Deathtouch) && damageToBlocker > 0)
-                                blocker.Kill();
-                            remainingDamage -= damageToBlocker;
-                        }
-
-                        int damageFromBlocker = (attackerProtected || blocker.keywordAbilities.Contains(KeywordAbility.CantDealCombatDamage))
-                            ? 0
-                            : Mathf.Max(blocker.power, 0);
-                        if (!attackerProtected)
-                        {
-                            totalDamageFromBlockers += damageFromBlocker;
-                            if (blocker.keywordAbilities.Contains(KeywordAbility.Deathtouch) && damageFromBlocker > 0)
-                                attacker.Kill();
-                        }
-
-                        if (damageToBlocker > 0 || damageFromBlocker > 0)
-                            SoundManager.Instance.PlaySound(SoundManager.Instance.impact);
-
-                        if (attacker.keywordAbilities.Contains(KeywordAbility.Lifelink) && damageToBlocker > 0)
-                        {
-                            Player owner = GetOwnerOfCard(attacker);
-                            TryGainLife(owner, damageToBlocker);
-                        }
-
-                        if (blocker.keywordAbilities.Contains(KeywordAbility.Lifelink) && damageFromBlocker > 0)
-                        {
-                            Player blockerOwner = GetOwnerOfCard(blocker);
-                            TryGainLife(blockerOwner, damageFromBlocker);
-                        }
-                    }
-
-                    attacker.TakeDamage(totalDamageFromBlockers);
-
-                    if (attacker.keywordAbilities.Contains(KeywordAbility.Trample) && remainingDamage > 0)
-                    {
-                        if (humanPlayer.Battlefield.Contains(attacker))
-                        {
-                            aiPlayer.Life -= remainingDamage;
-                            aiDamage += remainingDamage;
-                            NotifyCombatDamageToPlayer(attacker, aiPlayer);
-                        }
-                        else
-                        {
-                            humanPlayer.Life -= remainingDamage;
-                            playerDamage += remainingDamage;
-                            NotifyCombatDamageToPlayer(attacker, humanPlayer);
-                        }
-
-                        if (attacker.keywordAbilities.Contains(KeywordAbility.Lifelink))
-                        {
-                            TryGainLife(GetOwnerOfCard(attacker), remainingDamage);
-                        }
-                    }
-                }
-                else
-                {
-                    if (humanPlayer.Battlefield.Contains(attacker))
-                    {
-                        aiPlayer.Life -= attackerDamage;
-                        aiDamage += attackerDamage;
-                        NotifyCombatDamageToPlayer(attacker, aiPlayer);
-
-                        if (attacker.keywordAbilities.Contains(KeywordAbility.Lifelink))
-                        {
-                            Player owner = humanPlayer.Battlefield.Contains(attacker) ? humanPlayer : aiPlayer;
-                            TryGainLife(owner, attackerDamage);
-                        }
-                    }
-                    else
-                    {
-                        humanPlayer.Life -= attackerDamage;
-                        playerDamage += attackerDamage;
-                        NotifyCombatDamageToPlayer(attacker, humanPlayer);
-
-                        if (attacker.keywordAbilities.Contains(KeywordAbility.Lifelink))
-                        {
-                            TryGainLife(aiPlayer, attackerDamage);
-                        }
-                    }
-                }
-
-                return (playerDamage, aiDamage);
+                yield return StartCoroutine(VisualEffectManager.Instance.MoveCardToLifeContainer(attackerVisual.transform, startPos, !humanPlayer.Battlefield.Contains(attacker), 0.15f));
             }
+            yield return new WaitForSeconds(0.05f);
 
-        public IEnumerator ResolveCombatWithAnimations()
+            var (pd, ad) = ResolveCombatForAttacker(attacker);
+            if (pd > 0)
+                VisualEffectManager.Instance.ShowFloatingDamageForPlayer(pd, true);
+            if (ad > 0)
+                VisualEffectManager.Instance.ShowFloatingDamageForPlayer(ad, false);
+
+            if (activeCardVisuals.Contains(attackerVisual))
             {
-                ResetLifeDeltas();
-                foreach (var attacker in new List<CreatureCard>(currentAttackers))
-                {
-                    CardVisual attackerVisual = FindCardVisual(attacker);
-                    if (attackerVisual == null)
-                        continue;
-
-                    Vector3 startPos = attackerVisual.transform.position;
-                    Vector3 targetPos = startPos;
-
-                    if (attacker.blockedByThisBlocker != null && attacker.blockedByThisBlocker.Count > 0)
-                    {
-                        var blockerVisual = FindCardVisual(attacker.blockedByThisBlocker[0]);
-                        if (blockerVisual != null)
-                            targetPos = blockerVisual.transform.position;
-                    }
-                    else
-                    {
-                        Transform targetLife = humanPlayer.Battlefield.Contains(attacker) ? enemyLifeContainer.transform : playerLifeContainer.transform;
-                        targetPos = targetLife.position;
-                    }
-
-                    yield return StartCoroutine(MoveCard(attackerVisual.transform, startPos, targetPos, 0.15f));
-                    yield return new WaitForSeconds(0.05f);
-
-                    var (pd, ad) = ResolveCombatForAttacker(attacker);
-
-                    if (pd > 0)
-                        ShowFloatingDamage(pd, playerLifeContainer);
-                    if (ad > 0)
-                        ShowFloatingDamage(ad, enemyLifeContainer);
-
-                    if (activeCardVisuals.Contains(attackerVisual))
-                    {
-                        yield return StartCoroutine(MoveCard(attackerVisual.transform, attackerVisual.transform.position, startPos, 0.15f));
-                    }
-
-                    yield return new WaitForSeconds(0.05f);
-                }
-
-                foreach (var creature in humanPlayer.Battlefield.Concat(aiPlayer.Battlefield).OfType<CreatureCard>())
-                {
-                    if (creature.cardName == "Undead Army" &&
-                        (currentAttackers.Contains(creature) || creature.blockingThisAttacker != null))
-                    {
-                        creature.AddMinusOneCounter();
-                        var vis = FindCardVisual(creature);
-                        if (vis != null) vis.UpdateVisual();
-                    }
-                }
-
-                CheckDeaths(humanPlayer);
-                CheckDeaths(aiPlayer);
-
-                foreach (var card in humanPlayer.Battlefield)
-                {
-                    if (card is CreatureCard c)
-                    {
-                        c.blockingThisAttacker = null;
-                        c.blockedByThisBlocker.Clear();
-                    }
-                }
-                foreach (var card in aiPlayer.Battlefield)
-                {
-                    if (card is CreatureCard c)
-                    {
-                        c.blockingThisAttacker = null;
-                        c.blockedByThisBlocker.Clear();
-                    }
-                }
-
-                currentAttackers.Clear();
-                selectedBlockerForBlocking = null;
-                UpdateUI();
-                FinalizeLifeDeltas();
+                yield return StartCoroutine(VisualEffectManager.Instance.MoveCard(attackerVisual.transform, attackerVisual.transform.position, startPos, 0.15f));
             }
 
-        private IEnumerator ShowDeathVFXAndDelayLayout(Card card, Player owner, CardVisual visual, GameObject overridePrefab = null)
-        {
-            if (visual != null)
-                visual.EnableTargetingHighlight(false); // ensure highlight removed
-
-                pendingGraveyardAnimations++;
-
-                // 1. Create a placeholder object in the same layout slot
-            GameObject placeholderPrefab = overridePrefab != null ? overridePrefab : deathPlaceholderPrefab;
-            GameObject placeholder = Instantiate(placeholderPrefab, visual.transform.parent);
-                placeholder.transform.SetSiblingIndex(visual.transform.GetSiblingIndex());
-                placeholder.transform.localScale = visual.transform.localScale;
-                placeholder.transform.localPosition = visual.transform.localPosition + placeholder.transform.localPosition;
-
-                // 2. Remove the visual instantly, preserving layout slot
-                activeCardVisuals.Remove(visual);
-                Destroy(visual.gameObject);
-
-                // 3. Wait for VFX duration
-                yield return new WaitForSeconds(1.5f); // Match blood splat prefab's lifespan
-
-                // 4. Now destroy the placeholder — this causes the layout to update
-                Destroy(placeholder);
-
-                // 5. Create graveyard visual (if not a token)
-                if (!card.isToken)
-                {
-                    GameObject visualGO = Instantiate(cardPrefab,
-                        owner == humanPlayer ? playerGraveyardArea : aiGraveyardArea);
-                    CardVisual graveyardVisual = visualGO.GetComponent<CardVisual>();
-                    graveyardVisual.Setup(card, this);
-                    graveyardVisual.transform.SetParent(owner == humanPlayer ? playerGraveyardArea : aiGraveyardArea);
-                    graveyardVisual.transform.localPosition = Vector3.zero;
-                    graveyardVisual.UpdateGraveyardVisual();
-                    // Ensure overlay elements appear above
-                    // Place newest card on top of pile
-                    graveyardVisual.transform.SetAsLastSibling();
-                    EnsureGraveyardCounterOnTop(owner);
-
-                    activeCardVisuals.Add(graveyardVisual);
-                }
-
-                // 6. Move to graveyard data list (skip for tokens)
-                if (!card.isToken)
-                    owner.Graveyard.Add(card);
-                UpdateUI();
-                pendingGraveyardAnimations--;
-            }
-
-        private IEnumerator ShowHandDiscardVFX(Card card, Player owner, CardVisual visual)
-            {
-                if (visual != null)
-                    visual.EnableTargetingHighlight(false); // ensure highlight removed
-
-                // 1. Create placeholder
-                Transform parent = visual.transform.parent;
-                GameObject placeholder = Instantiate(deathPlaceholderPrefab, parent);
-                placeholder.transform.SetSiblingIndex(visual.transform.GetSiblingIndex());
-                placeholder.transform.localScale = visual.transform.localScale;
-                placeholder.transform.localPosition = visual.transform.localPosition;
-
-                // 2. Remove the visual (like battlefield death)
-                GameManager.Instance.activeCardVisuals.Remove(visual);
-                Destroy(visual.gameObject);
-
-                // 3. Wait for VFX duration (even shorter than battlefield)
-                yield return new WaitForSeconds(0.5f);
-
-                // 4. Destroy placeholder to allow layout rebuild
-                Destroy(placeholder);
-
-                // 5. Create graveyard visual
-                if (!card.isToken)
-                {
-                    GameObject visualGO = Instantiate(GameManager.Instance.cardPrefab,
-                        owner == GameManager.Instance.humanPlayer
-                            ? GameManager.Instance.playerGraveyardArea
-                            : GameManager.Instance.aiGraveyardArea);
-                    CardVisual graveyardVisual = visualGO.GetComponent<CardVisual>();
-                    graveyardVisual.Setup(card, GameManager.Instance);
-                    graveyardVisual.transform.localPosition = Vector3.zero;
-                    graveyardVisual.UpdateGraveyardVisual();
-                    // Keep UI overlay elements on top
-                    // Maintain newest card on top of pile
-                    graveyardVisual.transform.SetAsLastSibling();
-                    EnsureGraveyardCounterOnTop(owner);
-
-                    GameManager.Instance.activeCardVisuals.Add(graveyardVisual);
-                }
-
-                // 6. Move to graveyard data list (skip for tokens)
-                if (!card.isToken)
-                    owner.Graveyard.Add(card);
-                UpdateUI();
-            }
-
-        public void NotifyArtifactEntered(Card artifact, Player controller)
-        {
-            lastEnteredArtifact = artifact;
-            foreach (var player in new[] { humanPlayer, aiPlayer })
-            {
-                foreach (var card in player.Battlefield.ToList())
-                {
-                    foreach (var ability in card.abilities)
-                    {
-                        if (ability.timing == TriggerTiming.OnArtifactEnter && ability.effect != null)
-                        {
-                            if (card == artifact)
-                                continue;
-
-                            int oldLife = player.Life;
-                            ability.effect.Invoke(player, card);
-                            int gained = player.Life - oldLife;
-                            if (gained > 0)
-                            {
-                                ShowFloatingHeal(gained,
-                                    player == humanPlayer ? playerLifeContainer : enemyLifeContainer);
-                            }
-                        }
-                    }
-                }
-            }
-            lastEnteredArtifact = null;
+            yield return new WaitForSeconds(0.05f);
         }
 
-        public void NotifyEnchantmentEntered(Card enchantment, Player controller)
+        foreach (var creature in humanPlayer.Battlefield.Concat(aiPlayer.Battlefield).OfType<CreatureCard>())
         {
-            foreach (var player in new[] { humanPlayer, aiPlayer })
+            if (creature.cardName == "Undead Army" &&
+                (currentAttackers.Contains(creature) || creature.blockingThisAttacker != null))
             {
-                foreach (var card in player.Battlefield.ToList())
-                {
-                    foreach (var ability in card.abilities)
-                    {
-                        if (ability.timing == TriggerTiming.OnEnchantmentEnter && ability.effect != null)
-                        {
-                            if (card == enchantment)
-                                continue;
-
-                            int oldLife = player.Life;
-                            ability.effect.Invoke(player, card);
-                            int gained = player.Life - oldLife;
-                            if (gained > 0)
-                            {
-                                ShowFloatingHeal(gained,
-                                    player == humanPlayer ? playerLifeContainer : enemyLifeContainer);
-                            }
-                        }
-                    }
-                }
+                creature.AddMinusOneCounter();
+                var vis = FindCardVisual(creature);
+                if (vis != null) vis.UpdateVisual();
             }
         }
 
-        public void NotifyLandEntered(Card land, Player controller)
+        CheckDeaths(humanPlayer);
+        CheckDeaths(aiPlayer);
+
+        foreach (var card in humanPlayer.Battlefield)
         {
-            foreach (var player in new[] { humanPlayer, aiPlayer })
+            if (card is CreatureCard c)
             {
-                foreach (var card in player.Battlefield.ToList())
-                {
-                    foreach (var ability in card.abilities)
-                    {
-                        if (ability.timing == TriggerTiming.OnLandEnter && ability.effect != null)
-                        {
-                            int oldLife = player.Life;
-                            ability.effect.Invoke(player, card);
-                            int gained = player.Life - oldLife;
-                            if (gained > 0)
-                            {
-                                ShowFloatingHeal(gained,
-                                    player == humanPlayer ? playerLifeContainer : enemyLifeContainer);
-                            }
-                        }
-                    }
-                }
+                c.blockingThisAttacker = null;
+                c.blockedByThisBlocker.Clear();
+            }
+        }
+        foreach (var card in aiPlayer.Battlefield)
+        {
+            if (card is CreatureCard c)
+            {
+                c.blockingThisAttacker = null;
+                c.blockedByThisBlocker.Clear();
             }
         }
 
-        public void NotifyCreatureEntered(Card creature, Player controller)
-        {
-            if (!(creature is CreatureCard))
-                return;
+        currentAttackers.Clear();
+        selectedBlockerForBlocking = null;
+        UpdateUI();
+        VisualEffectManager.Instance.FinalizeLifeDeltas();
+    }
 
-            lastEnteredCreature = creature;
-            foreach (var player in new[] { humanPlayer, aiPlayer })
-            {
-                foreach (var card in player.Battlefield.ToList())
-                {
-                    foreach (var ability in card.abilities)
-                    {
-                        if (ability.timing == TriggerTiming.OnCreatureEnter && ability.effect != null)
-                        {
-                            ability.effect.Invoke(player, card);
-                        }
-                    }
-                }
-            }
-            lastEnteredCreature = null;
+    private IEnumerator ShowDeathVFXAndDelayLayout(Card card, Player owner, CardVisual visual, GameObject overridePrefab = null)
+    {
+        if (visual != null)
+            visual.EnableTargetingHighlight(false); // ensure highlight removed
+
+        pendingGraveyardAnimations++;
+
+        // 1. Create a placeholder object in the same layout slot
+        GameObject placeholderPrefab = overridePrefab != null ? overridePrefab : deathPlaceholderPrefab;
+        GameObject placeholder = Instantiate(placeholderPrefab, visual.transform.parent);
+        placeholder.transform.SetSiblingIndex(visual.transform.GetSiblingIndex());
+        placeholder.transform.localScale = visual.transform.localScale;
+        placeholder.transform.localPosition = visual.transform.localPosition + placeholder.transform.localPosition;
+
+        // 2. Remove the visual instantly, preserving layout slot
+        activeCardVisuals.Remove(visual);
+        Destroy(visual.gameObject);
+
+        // 3. Wait for VFX duration
+        yield return new WaitForSeconds(1.5f); // Match blood splat prefab's lifespan
+
+        // 4. Now destroy the placeholder — this causes the layout to update
+        Destroy(placeholder);
+
+        // 5. Create graveyard visual (if not a token)
+        if (!card.isToken)
+        {
+            GameObject visualGO = Instantiate(cardPrefab,
+                owner == humanPlayer ? playerGraveyardArea : aiGraveyardArea);
+            CardVisual graveyardVisual = visualGO.GetComponent<CardVisual>();
+            graveyardVisual.Setup(card, this);
+            graveyardVisual.transform.SetParent(owner == humanPlayer ? playerGraveyardArea : aiGraveyardArea);
+            graveyardVisual.transform.localPosition = Vector3.zero;
+            graveyardVisual.UpdateGraveyardVisual();
+            // Ensure overlay elements appear above
+            // Place newest card on top of pile
+            graveyardVisual.transform.SetAsLastSibling();
+            EnsureGraveyardCounterOnTop(owner);
+
+            activeCardVisuals.Add(graveyardVisual);
         }
 
-        public void NotifyLandLeft(Card land, Player controller)
+        // 6. Move to graveyard data list (skip for tokens)
+        if (!card.isToken)
+            owner.Graveyard.Add(card);
+        UpdateUI();
+        pendingGraveyardAnimations--;
+    }
+
+    private IEnumerator ShowHandDiscardVFX(Card card, Player owner, CardVisual visual)
+    {
+        if (visual != null)
+            visual.EnableTargetingHighlight(false); // ensure highlight removed
+
+        // 1. Create placeholder
+        Transform parent = visual.transform.parent;
+        GameObject placeholder = Instantiate(deathPlaceholderPrefab, parent);
+        placeholder.transform.SetSiblingIndex(visual.transform.GetSiblingIndex());
+        placeholder.transform.localScale = visual.transform.localScale;
+        placeholder.transform.localPosition = visual.transform.localPosition;
+
+        // 2. Remove the visual (like battlefield death)
+        GameManager.Instance.activeCardVisuals.Remove(visual);
+        Destroy(visual.gameObject);
+
+        // 3. Wait for VFX duration (even shorter than battlefield)
+        yield return new WaitForSeconds(0.5f);
+
+        // 4. Destroy placeholder to allow layout rebuild
+        Destroy(placeholder);
+
+        // 5. Create graveyard visual
+        if (!card.isToken)
         {
-            foreach (var player in new[] { humanPlayer, aiPlayer })
-            {
-                foreach (var card in player.Battlefield.ToList())
-                {
-                    foreach (var ability in card.abilities)
-                    {
-                        if (ability.timing == TriggerTiming.OnLandLeave && ability.effect != null)
-                        {
-                            int oldLife = player.Life;
-                            ability.effect.Invoke(player, card);
-                            int gained = player.Life - oldLife;
-                            if (gained > 0)
-                            {
-                                ShowFloatingHeal(gained,
-                                    player == humanPlayer ? playerLifeContainer : enemyLifeContainer);
-                            }
-                        }
-                    }
-                }
-            }
+            GameObject visualGO = Instantiate(GameManager.Instance.cardPrefab,
+                owner == GameManager.Instance.humanPlayer
+                    ? GameManager.Instance.playerGraveyardArea
+                    : GameManager.Instance.aiGraveyardArea);
+            CardVisual graveyardVisual = visualGO.GetComponent<CardVisual>();
+            graveyardVisual.Setup(card, GameManager.Instance);
+            graveyardVisual.transform.localPosition = Vector3.zero;
+            graveyardVisual.UpdateGraveyardVisual();
+            // Keep UI overlay elements on top
+            // Maintain newest card on top of pile
+            graveyardVisual.transform.SetAsLastSibling();
+            EnsureGraveyardCounterOnTop(owner);
+
+            GameManager.Instance.activeCardVisuals.Add(graveyardVisual);
         }
 
-        public int lastLifeGainedAmount = 0;
+        // 6. Move to graveyard data list (skip for tokens)
+        if (!card.isToken)
+            owner.Graveyard.Add(card);
+        UpdateUI();
+    }
 
-        public void NotifyLifeGain(Player player, int amount)
+    public void NotifyArtifactEntered(Card artifact, Player controller)
+    {
+        lastEnteredArtifact = artifact;
+        foreach (var player in new[] { humanPlayer, aiPlayer })
         {
-            lastLifeGainedAmount = amount;
             foreach (var card in player.Battlefield.ToList())
             {
                 foreach (var ability in card.abilities)
                 {
-                    if (ability.timing == TriggerTiming.OnLifeGain && ability.effect != null)
+                    if (ability.timing == TriggerTiming.OnArtifactEnter && ability.effect != null)
+                    {
+                        if (card == artifact)
+                            continue;
+
+                        int oldLife = player.Life;
+                        ability.effect.Invoke(player, card);
+                        int gained = player.Life - oldLife;
+                        if (gained > 0)
+                        {
+                            VisualEffectManager.Instance.ShowFloatingHealForPlayer(gained, player == humanPlayer);
+                        }
+                    }
+                }
+            }
+        }
+        lastEnteredArtifact = null;
+    }
+
+    public void NotifyEnchantmentEntered(Card enchantment, Player controller)
+    {
+        foreach (var player in new[] { humanPlayer, aiPlayer })
+        {
+            foreach (var card in player.Battlefield.ToList())
+            {
+                foreach (var ability in card.abilities)
+                {
+                    if (ability.timing == TriggerTiming.OnEnchantmentEnter && ability.effect != null)
+                    {
+                        if (card == enchantment)
+                            continue;
+
+                        int oldLife = player.Life;
+                        ability.effect.Invoke(player, card);
+                        int gained = player.Life - oldLife;
+                        if (gained > 0)
+                        {
+                            VisualEffectManager.Instance.ShowFloatingHealForPlayer(gained, player == humanPlayer);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    public void NotifyLandEntered(Card land, Player controller)
+    {
+        foreach (var player in new[] { humanPlayer, aiPlayer })
+        {
+            foreach (var card in player.Battlefield.ToList())
+            {
+                foreach (var ability in card.abilities)
+                {
+                    if (ability.timing == TriggerTiming.OnLandEnter && ability.effect != null)
                     {
                         int oldLife = player.Life;
                         ability.effect.Invoke(player, card);
                         int gained = player.Life - oldLife;
                         if (gained > 0)
                         {
-                            ShowFloatingHeal(gained,
-                                player == humanPlayer ? playerLifeContainer : enemyLifeContainer);
+                            VisualEffectManager.Instance.ShowFloatingHealForPlayer(gained, player == humanPlayer);
                         }
                     }
                 }
             }
-            lastLifeGainedAmount = 0;
         }
+    }
 
-        public int lastCardsDrawnAmount = 0;
+    public void NotifyCreatureEntered(Card creature, Player controller)
+    {
+        if (!(creature is CreatureCard))
+            return;
 
-        public Player lastDiscardingPlayer = null;
-
-        public Card lastDeadCreature = null;
-
-        public Card lastEnteredCreature = null;
-
-        public Card lastEnteredArtifact = null;
-
-        // Tracks the source card of the ability currently being resolved.
-        public Card lastAbilitySource = null;
-
-        public void NotifyCardDrawn(Player player, int amount)
+        lastEnteredCreature = creature;
+        foreach (var player in new[] { humanPlayer, aiPlayer })
         {
-            lastCardsDrawnAmount = amount;
             foreach (var card in player.Battlefield.ToList())
             {
                 foreach (var ability in card.abilities)
                 {
-                    if (ability.timing == TriggerTiming.OnCardDraw && ability.effect != null)
+                    if (ability.timing == TriggerTiming.OnCreatureEnter && ability.effect != null)
                     {
                         ability.effect.Invoke(player, card);
                     }
                 }
             }
-            lastCardsDrawnAmount = 0;
         }
+        lastEnteredCreature = null;
+    }
 
-        public void NotifyOpponentDraw(Player drawingPlayer)
+    public void NotifyLandLeft(Card land, Player controller)
+    {
+        foreach (var player in new[] { humanPlayer, aiPlayer })
         {
-            foreach (var player in new[] { humanPlayer, aiPlayer })
+            foreach (var card in player.Battlefield.ToList())
             {
-                if (player == drawingPlayer)
-                    continue;
-
-                foreach (var card in player.Battlefield.ToList())
+                foreach (var ability in card.abilities)
                 {
-                    foreach (var ability in card.abilities)
+                    if (ability.timing == TriggerTiming.OnLandLeave && ability.effect != null)
                     {
-                        if (ability.timing == TriggerTiming.OnOpponentDraw && ability.effect != null)
+                        int oldLife = player.Life;
+                        ability.effect.Invoke(player, card);
+                        int gained = player.Life - oldLife;
+                        if (gained > 0)
                         {
-                            ability.effect.Invoke(player, card);
+                            VisualEffectManager.Instance.ShowFloatingHealForPlayer(gained, player == humanPlayer);
                         }
                     }
                 }
             }
         }
+    }
 
-        public void NotifyOpponentDiscard(Player discardingPlayer)
+    public int lastLifeGainedAmount = 0;
+
+    public void NotifyLifeGain(Player player, int amount)
+    {
+        lastLifeGainedAmount = amount;
+        foreach (var card in player.Battlefield.ToList())
         {
-            foreach (var player in new[] { humanPlayer, aiPlayer })
+            foreach (var ability in card.abilities)
             {
-                if (player == discardingPlayer)
-                    continue;
-
-                foreach (var card in player.Battlefield.ToList())
+                if (ability.timing == TriggerTiming.OnLifeGain && ability.effect != null)
                 {
-                    foreach (var ability in card.abilities)
+                    int oldLife = player.Life;
+                    ability.effect.Invoke(player, card);
+                    int gained = player.Life - oldLife;
+                    if (gained > 0)
                     {
-                        if (ability.timing == TriggerTiming.OnOpponentDiscard && ability.effect != null)
-                        {
-                            ability.effect.Invoke(player, card);
-                        }
+                        VisualEffectManager.Instance.ShowFloatingHealForPlayer(gained, player == humanPlayer);
                     }
                 }
             }
         }
+        lastLifeGainedAmount = 0;
+    }
 
-        public void NotifyPlayerDiscard(Player discardingPlayer)
+    public int lastCardsDrawnAmount = 0;
+
+    public Player lastDiscardingPlayer = null;
+
+    public Card lastDeadCreature = null;
+
+    public Card lastEnteredCreature = null;
+
+    public Card lastEnteredArtifact = null;
+
+    // Tracks the source card of the ability currently being resolved.
+    public Card lastAbilitySource = null;
+
+    public void NotifyCardDrawn(Player player, int amount)
+    {
+        lastCardsDrawnAmount = amount;
+        foreach (var card in player.Battlefield.ToList())
         {
-            lastDiscardingPlayer = discardingPlayer;
-            foreach (var player in new[] { humanPlayer, aiPlayer })
+            foreach (var ability in card.abilities)
             {
-                foreach (var card in player.Battlefield.ToList())
+                if (ability.timing == TriggerTiming.OnCardDraw && ability.effect != null)
                 {
-                    foreach (var ability in card.abilities)
-                    {
-                        if (ability.timing == TriggerTiming.OnPlayerDiscard && ability.effect != null)
-                        {
-                            ability.effect.Invoke(player, card);
-                        }
-                    }
-                }
-            }
-            lastDiscardingPlayer = null;
-        }
-
-        public void NotifyCreatureDiesOrDiscarded(Card creature, Player owner)
-        {
-            if (!(creature is CreatureCard))
-                return;
-
-            foreach (var player in new[] { humanPlayer, aiPlayer })
-            {
-                foreach (var card in player.Battlefield.ToList())
-                {
-                    foreach (var ability in card.abilities)
-                    {
-                        if (ability.timing == TriggerTiming.OnCreatureDiesOrDiscarded && ability.effect != null)
-                        {
-                            QueueTriggeredAbility(ability, player, card, card, creature);
-                        }
-                    }
+                    ability.effect.Invoke(player, card);
                 }
             }
         }
+        lastCardsDrawnAmount = 0;
+    }
 
-        public void NotifyCreatureDies(Card creature, Player owner)
+    public void NotifyOpponentDraw(Player drawingPlayer)
+    {
+        foreach (var player in new[] { humanPlayer, aiPlayer })
         {
-            if (!(creature is CreatureCard))
-                return;
+            if (player == drawingPlayer)
+                continue;
 
-            foreach (var player in new[] { humanPlayer, aiPlayer })
+            foreach (var card in player.Battlefield.ToList())
             {
-                foreach (var card in player.Battlefield.ToList())
+                foreach (var ability in card.abilities)
                 {
-                    foreach (var ability in card.abilities)
+                    if (ability.timing == TriggerTiming.OnOpponentDraw && ability.effect != null)
                     {
-                        if (ability.timing == TriggerTiming.OnCreatureDies && ability.effect != null)
-                        {
-                            QueueTriggeredAbility(ability, player, card, card, creature);
-                        }
+                        ability.effect.Invoke(player, card);
                     }
                 }
             }
         }
+    }
 
-        public void NotifyCombatDamageToPlayer(CreatureCard attacker, Player target)
+    public void NotifyOpponentDiscard(Player discardingPlayer)
+    {
+        foreach (var player in new[] { humanPlayer, aiPlayer })
         {
-            foreach (var player in new[] { humanPlayer, aiPlayer })
+            if (player == discardingPlayer)
+                continue;
+
+            foreach (var card in player.Battlefield.ToList())
             {
-                foreach (var card in player.Battlefield.ToList())
+                foreach (var ability in card.abilities)
                 {
-                    foreach (var ability in card.abilities)
+                    if (ability.timing == TriggerTiming.OnOpponentDiscard && ability.effect != null)
                     {
-                        if (ability.timing == TriggerTiming.OnCombatDamageToPlayer && ability.effect != null)
-                        {
-                            ability.effect.Invoke(player, card);
-                        }
+                        ability.effect.Invoke(player, card);
                     }
                 }
             }
         }
+    }
 
-        public void NotifyCreatureBlocks(CreatureCard blocker, CreatureCard attacker)
+    public void NotifyPlayerDiscard(Player discardingPlayer)
+    {
+        lastDiscardingPlayer = discardingPlayer;
+        foreach (var player in new[] { humanPlayer, aiPlayer })
         {
-            if (blocker == null || attacker == null)
-                return;
-
-            Player owner = GetOwnerOfCard(blocker);
-            if (owner == null)
-                return;
-
-            foreach (var ability in blocker.abilities)
+            foreach (var card in player.Battlefield.ToList())
             {
-                if (ability.timing == TriggerTiming.OnBlock && ability.effect != null)
+                foreach (var ability in card.abilities)
                 {
-                    QueueTriggeredAbility(ability, owner, blocker, attacker);
+                    if (ability.timing == TriggerTiming.OnPlayerDiscard && ability.effect != null)
+                    {
+                        ability.effect.Invoke(player, card);
+                    }
                 }
             }
         }
+        lastDiscardingPlayer = null;
+    }
 
-        public void GainLife(Player player, int amount)
+    public void NotifyCreatureDiesOrDiscarded(Card creature, Player owner)
+    {
+        if (!(creature is CreatureCard))
+            return;
+
+        foreach (var player in new[] { humanPlayer, aiPlayer })
         {
-            TryGainLife(player, amount);
-        }
-
-        private void AwardFavouriteCardCoins(Card card, Player caster)
-        {
-            if (caster == humanPlayer && !string.IsNullOrEmpty(favouriteCardName) && card.cardName == favouriteCardName)
+            foreach (var card in player.Battlefield.ToList())
             {
-                CoinsManager.AddCoins(5);
-                ShowFavouritePopup();
-            }
-        }
-
-        public void CheckForGameEnd()
-        {
-            if (gameOver)
-                return;
-
-            if (aiPlayer.Life <= 0 && humanPlayer.Life <= 0)
-            {
-                Debug.Log("Both players died — draw counts as a loss for the human player.");
-                gameOver = true;
-                if (TurnSystem.Instance != null)
-                    TurnSystem.Instance.StopAllCoroutines();
-                FindObjectOfType<WinScreenUI>().ShowLoseScreen();
-            }
-            else if (aiPlayer.Life <= 0)
-            {
-                Debug.Log("AI defeated — player wins!");
-                CardData reward = PlayerCollection.AddRandomCard();
-                gameOver = true;
-                if (TurnSystem.Instance != null)
-                    TurnSystem.Instance.StopAllCoroutines();
-                FindObjectOfType<WinScreenUI>().ShowWinScreen(reward);
-            }
-            else if (humanPlayer.Life <= 0)
-            {
-                Debug.Log("Human player defeated — game lost.");
-                gameOver = true;
-                if (TurnSystem.Instance != null)
-                    TurnSystem.Instance.StopAllCoroutines();
-                FindObjectOfType<WinScreenUI>().ShowLoseScreen();
+                foreach (var ability in card.abilities)
+                {
+                    if (ability.timing == TriggerTiming.OnCreatureDiesOrDiscarded && ability.effect != null)
+                    {
+                        QueueTriggeredAbility(ability, player, card, card, creature);
+                    }
+                }
             }
         }
+    }
+
+    public void NotifyCreatureDies(Card creature, Player owner)
+    {
+        if (!(creature is CreatureCard))
+            return;
+
+        foreach (var player in new[] { humanPlayer, aiPlayer })
+        {
+            foreach (var card in player.Battlefield.ToList())
+            {
+                foreach (var ability in card.abilities)
+                {
+                    if (ability.timing == TriggerTiming.OnCreatureDies && ability.effect != null)
+                    {
+                        QueueTriggeredAbility(ability, player, card, card, creature);
+                    }
+                }
+            }
+        }
+    }
+
+    public void NotifyCombatDamageToPlayer(CreatureCard attacker, Player target)
+    {
+        foreach (var player in new[] { humanPlayer, aiPlayer })
+        {
+            foreach (var card in player.Battlefield.ToList())
+            {
+                foreach (var ability in card.abilities)
+                {
+                    if (ability.timing == TriggerTiming.OnCombatDamageToPlayer && ability.effect != null)
+                    {
+                        ability.effect.Invoke(player, card);
+                    }
+                }
+            }
+        }
+    }
+
+    public void NotifyCreatureBlocks(CreatureCard blocker, CreatureCard attacker)
+    {
+        if (blocker == null || attacker == null)
+            return;
+
+        Player owner = GetOwnerOfCard(blocker);
+        if (owner == null)
+            return;
+
+        foreach (var ability in blocker.abilities)
+        {
+            if (ability.timing == TriggerTiming.OnBlock && ability.effect != null)
+            {
+                QueueTriggeredAbility(ability, owner, blocker, attacker);
+            }
+        }
+    }
+
+    public void GainLife(Player player, int amount)
+    {
+        TryGainLife(player, amount);
+    }
+
+    private void AwardFavouriteCardCoins(Card card, Player caster)
+    {
+        if (caster == humanPlayer && !string.IsNullOrEmpty(favouriteCardName) && card.cardName == favouriteCardName)
+        {
+            CoinsManager.AddCoins(5);
+            VisualEffectManager.Instance.ShowFavouritePopup();
+        }
+    }
+
+    public void CheckForGameEnd()
+    {
+        if (gameOver)
+            return;
+
+        if (aiPlayer.Life <= 0 && humanPlayer.Life <= 0)
+        {
+            Debug.Log("Both players died — draw counts as a loss for the human player.");
+            gameOver = true;
+            if (TurnSystem.Instance != null)
+                TurnSystem.Instance.StopAllCoroutines();
+            FindObjectOfType<WinScreenUI>().ShowLoseScreen();
+        }
+        else if (aiPlayer.Life <= 0)
+        {
+            Debug.Log("AI defeated — player wins!");
+            CardData reward = PlayerCollection.AddRandomCard();
+            gameOver = true;
+            if (TurnSystem.Instance != null)
+                TurnSystem.Instance.StopAllCoroutines();
+            FindObjectOfType<WinScreenUI>().ShowWinScreen(reward);
+        }
+        else if (humanPlayer.Life <= 0)
+        {
+            Debug.Log("Human player defeated — game lost.");
+            gameOver = true;
+            if (TurnSystem.Instance != null)
+                TurnSystem.Instance.StopAllCoroutines();
+            FindObjectOfType<WinScreenUI>().ShowLoseScreen();
+        }
+    }
 }
